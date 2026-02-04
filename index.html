@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>英読 - Smart Reader</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-left">
+            <button id="back-to-library" onclick="showLibrary()" style="display:none;">📖 本棚</button>
+            <h1 id="app-title">英読</h1>
+        </div>
+        <div id="article-meta" style="display:none;">
+            <button onclick="editCurrentArticle()" class="small-edit-btn">編集</button>
+            <a id="display-url" href="#" target="_blank">🔗 元記事</a>
+        </div>
+    </header>
+
+    <main id="main-reader">
+        <div id="library-section">
+            <div class="library-header">
+                <div id="breadcrumbs" class="breadcrumbs"></div>
+                <div class="library-actions">
+                    <input type="text" id="global-search-input" placeholder="全データから検索..." oninput="performGlobalSearch()">
+                    <button class="btn-sub" onclick="createNewFolder()">＋ フォルダ</button>
+                    <button class="start-btn" onclick="showInputArea()">＋ 記事作成</button>
+                </div>
+            </div>
+            <div id="library-list" class="library-grid"></div>
+        </div>
+
+        <div id="input-area" class="input-card" style="display:none;">
+            <h2 id="input-title-label">記事を登録</h2>
+            <div class="file-upload-zone">
+                <label for="file-input" class="file-label">
+                    <span id="file-label-text">📄 PDF / TXT ファイルを読み込む</span>
+                    <input type="file" id="file-input" accept=".pdf,.txt" onchange="handleFileUpload(event)">
+                </label>
+            </div>
+            <div class="full-width-form">
+                <input type="text" id="text-title" placeholder="タイトルの名前">
+                <input type="url" id="text-url" placeholder="出典URL（https://...）">
+                <textarea id="text-input" placeholder="本文を入力..."></textarea>
+            </div>
+            <div class="input-actions">
+                <button onclick="showLibrary()" class="btn-cancel">キャンセル</button>
+                <button onclick="saveNewArticle()" class="start-btn">保存して読む</button>
+            </div>
+        </div>
+
+        <div id="reader-wrapper" style="display:none; height:100%; display:flex; flex-direction:column;">
+            <div id="reader-search-bar">
+                <input type="text" id="reader-search-input" placeholder="本文内を検索..." oninput="searchInText()">
+                <span id="search-count">0件</span>
+            </div>
+            
+            <div id="text-display" onscroll="updateProgress()" onclick="handleReaderClick(event)"></div>
+
+        <div id="reading-status-bar" style="height: auto; flex-direction: column; padding: 10px;">
+    <div style="display: flex; justify-content: space-between; width: 100%; align-items: center; margin-bottom: 8px;">
+        <div class="status-info">
+            <span id="char-count">0文字</span> | 
+            <span id="read-progress">0%</span>
+        </div>
+        <button id="bookmark-btn" onclick="addBookmark()" style="background: var(--primary); color: white; border: none; padding: 5px 12px; border-radius: 4px;">🔖 しおりを追加</button>
+    </div>
+    <div id="bookmark-list" style="display: flex; gap: 8px; overflow-x: auto; width: 100%; padding-bottom: 5px;"></div>
+</div>
+
+    </main>
+
+    <aside id="side-panel" class="panel">
+        <div class="panel-header">
+            <nav class="tabs">
+                <button class="tab-btn active" onclick="switchTab('words')">単語</button>
+                <button class="tab-btn" onclick="switchTab('notes')">ノート</button>
+                <button class="tab-btn" onclick="switchTab('settings')">⚙️</button>
+            </nav>
+            <button class="close-btn" onclick="togglePanel()">✕</button>
+        </div>
+        
+        <div id="anki-wrapper" class="panel-controls">
+            <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+                <input type="text" id="list-search" placeholder="リスト内検索..." oninput="handleListSearch()" style="margin-bottom:0; flex:1;">
+                <button onclick="exportToCSV()" class="btn-export">⬇️</button>
+            </div>
+        </div>
+
+        <div class="control-row">
+                <div class="anki-settings-group">
+                    <label class="anki-toggle">
+                        <input type="checkbox" id="anki-mode-check" onchange="toggleAnkiMode()"> 
+                        <span>暗記モード</span>
+                    </label>
+                    <select id="anki-target-select" onchange="toggleAnkiMode()" class="mini-select">
+                        <option value="both">両方隠す</option>
+                        <option value="word">単語を隠す</option>
+                        <option value="meaning">意味を隠す</option>
+                    </select>
+                </div>
+            </div>
+            <div class="control-row" style="margin-top:8px;">
+                <label class="anki-toggle">
+                    <input type="checkbox" id="hide-memorized-check" onchange="renderList('words')"> 
+                    <span style="font-size:0.9em; color:#666;">覚えた単語（✅）を隠す</span>
+                </label>
+            </div>
+        </div>
+        <div id="panel-content" class="scroll-area"></div>
+   
+    </aside>
+
+    <button id="add-btn" class="fab-btn" onclick="openUnifiedModal()">＋</button>
+    <button id="fab-toggle" class="fab-btn" onclick="togglePanel()">📋</button>
+
+    <div id="unified-modal-overlay" class="modal-overlay">
+        <div class="modal-content">
+            <h2 style="text-align:center; margin-top:0;">追加・編集</h2>
+            
+            <div class="modal-type-switch">
+                <label class="type-radio">
+                    <input type="radio" name="modal-type" value="word" checked onchange="switchModalType('word')">
+                    <span>単語</span>
+                </label>
+                <label class="type-radio">
+                    <input type="radio" name="modal-type" value="note" onchange="switchModalType('note')">
+                    <span>ノート</span>
+                </label>
+            </div>
+
+            <form onsubmit="handleUnifiedSave(event)">
+                <div id="form-word-section">
+                    <label>単語 / フレーズ</label>
+                    <input type="text" id="input-word-text" required>
+                    <label>意味</label>
+                    <input type="text" id="input-word-meaning" required>
+                    <label>メモ (任意)</label>
+                    <textarea id="input-word-memo" rows="2"></textarea>
+                </div>
+
+                <div id="form-note-section" style="display:none;">
+                    <label>対象の英文 (原文)</label>
+                    <textarea id="input-note-eng" rows="3" required></textarea>
+                    <label>和訳・意味</label>
+                    <textarea id="input-note-trans" rows="3"></textarea>
+                    <label>解説・解釈 (文法など)</label> <textarea id="input-note-extra" rows="3"></textarea>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" onclick="closeModal()">中止</button>
+                    <button type="submit" class="btn-save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="move-modal-overlay" class="modal-overlay">
+        <div class="modal-content">
+            <h3>移動先を選択</h3>
+            <p id="move-target-name" style="color:#666; font-size:0.9em;"></p>
+            <select id="move-select" class="full-width-select"></select>
+            <div class="modal-actions">
+                <button type="button" onclick="document.getElementById('move-modal-overlay').classList.remove('show')">中止</button>
+                <button type="button" onclick="submitMove()" class="btn-save">移動</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
