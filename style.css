@@ -70,7 +70,7 @@ input, textarea, select { font-size: 16px !important; }
 
 /* ハイライト */
 .note-highlight { border-bottom: 2px dashed #f39c12; background: rgba(243, 156, 18, 0.1); cursor: pointer; }
-.word-highlight { background-color: #53adad; cursor: pointer; border-radius: 2px; } /* ★単語用マーカー */
+.word-highlight { background-color: #b0e8f7; cursor: pointer; border-radius: 2px; } /* ★単語用マーカー */
 .search-match { background: #ffeb3b; color: black; border-bottom: 2px solid #f57f17; }
 .text-highlight { background: #669a2b; font-weight: bold; } /* 検索ヒット用 */
 
@@ -307,3 +307,4 @@ input, textarea, select { font-size: 16px !important; }
     padding: 0 2px;
 
 }
+
