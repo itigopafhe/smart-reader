@@ -450,7 +450,7 @@ function renderList(type, filter = '') {
     if (type === 'words' && isAnkiMode) container.classList.add(`anki-mask-${document.getElementById('anki-target-select').value}`);
 
     let list = type === 'words' ? [...currentArticle.words] : [...currentArticle.notes];
-    if (type === 'words' && document.getElementById('filter-unmemorized')?.checked) list = list.filter(i => !i.memorized);
+    if (type === 'words' && document.getElementById('hide-memorized-check')?.checked) list = list.filter(i => !i.memorized);
 
     if (filter) {
         const q = filter.toLowerCase();
