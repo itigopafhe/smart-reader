@@ -20,6 +20,34 @@ const SAMPLE_DATA = [
             { id: 3001, originalText: "Welcome to Smart Reader!", translation: "Smart Readerへようこそ！", extra: "基本の挨拶フレーズです。" }
         ],
         bookmarks: []
+    },
+    {
+        id: 1003,
+        type: 'article',
+        name: "🍅 The Pomodoro Technique",
+        parentId: 1001, // 「チュートリアル」フォルダに入ります
+        content: "The Pomodoro Technique is a time management method developed by Francesco Cirillo in the late 1980s.\n\nIt uses a timer to break work into intervals, traditionally 25 minutes in length, separated by short breaks. Each interval is known as a pomodoro, from the Italian word for 'tomato', after the tomato-shaped kitchen timer that Cirillo used as a university student.\n\nThe method is simple: choose a task, set the timer for 25 minutes, and work until the timer rings. Then, take a short break (about 5 minutes). After four pomodoros, take a longer break.",
+        url: "https://en.wikipedia.org/wiki/Pomodoro_Technique",
+        words: [
+            { id: 2002, word: "interval", meaning: "間隔、合間", memo: "発音: íntervəl", memorized: false },
+            { id: 2003, word: "traditionally", meaning: "伝統的に、慣例として", memo: "traditional (形容詞) の副詞形", memorized: false },
+            { id: 2004, word: "separated", meaning: "分けられた、離れた", memo: "separate (動詞/形容詞) の過去分詞形", memorized: false }
+        ],
+        notes: [
+            { 
+                id: 3002, 
+                originalText: "It uses a timer to break work into intervals, traditionally 25 minutes in length, separated by short breaks.", 
+                translation: "この手法ではタイマーを使い、作業を短い休憩で区切られた（通常は25分間の）「間隔」へと分割します。", 
+                extra: "「separated by short breaks」は前の「intervals」を詳しく説明する過去分詞の後置修飾です。" 
+            },
+            { 
+                id: 3003, 
+                originalText: "Each interval is known as a pomodoro, from the Italian word for 'tomato'", 
+                translation: "各インターバルは「ポモドーロ」として知られており、これはイタリア語で「トマト」を意味します。", 
+                extra: "「be known as ～」＝「～として知られている」という重要表現が含まれています。" 
+            }
+        ],
+        bookmarks: []
     }
 ];
 
@@ -242,10 +270,18 @@ async function saveNewArticle() {
 // --- 検索システム (スニペット表示) ---
 // --- 検索システム (スニペット表示・ジャンプ機能付き) ---
 function performGlobalSearch() { 
-    const q = document.getElementById('global-search-input').value.toLowerCase(); 
+    const inputQ = document.getElementById('global-search-input').value;
+    const q = inputQ.toLowerCase(); 
     const l = document.getElementById('library-list'); 
     l.innerHTML = ''; 
+    
     if (!q) { showLibrary(); return; }
+
+    // ★追加: HTMLタグを無害化する関数
+    const escapeHtml = (str) => {
+        if(!str) return '';
+        return str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+    };
 
     const results = libraryItems.filter(item => {
         if (item.type === 'folder') return item.name.toLowerCase().includes(q);
@@ -259,11 +295,17 @@ function performGlobalSearch() {
     results.forEach(item => { 
         const card = document.createElement('div'); 
         card.className = `item-card ${item.type === 'folder' ? 'folder-icon' : 'article-icon'}`; 
-        // カード自体のクリックは通常通り記事を開く
         card.onclick = () => item.type === 'folder' ? goToFolder(item.id) : openArticle(item.id); 
         
         let snippetHtml = "";
-        const highlight = (t) => t.replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'), '<span class="search-highlight">$1</span>');
+        
+        // ★修正: エスケープしてからハイライトタグを付与する
+        const highlight = (t) => {
+            const escaped = escapeHtml(t);
+            // エスケープ後の文字列に対して、検索語(q)をハイライトタグで囲む
+            // ※検索語自体もエスケープが必要な文字を含まない前提の簡易実装
+            return escaped.replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'), '<span class="search-highlight">$1</span>');
+        };
 
         if(item.type === 'article') {
             // 1. タイトルヒット
@@ -278,10 +320,15 @@ function performGlobalSearch() {
             if(item.content && item.content.toLowerCase().includes(q)) {
                 const idx = item.content.toLowerCase().indexOf(q);
                 const start = Math.max(0, idx - 15);
+                // ★修正: 切り出したテキストを highlight 関数に通す（中でエスケープされる）
+                const rawText = item.content.substring(start, idx + q.length + 20);
+                
+                // ★修正: クリック時に openArticleAndSearch を呼び出すように変更
+                // inputQ (元の検索語) を渡す
                 snippetHtml += `
-                    <div class="match-row" onclick="event.stopPropagation(); openArticle(${item.id})">
+                    <div class="match-row" onclick="event.stopPropagation(); openArticleAndSearch(${item.id}, '${inputQ.replace(/'/g, "\\'")}')">
                         <span class="match-tag content-tag">本文</span>
-                        <div class="match-text">${highlight(item.content.substring(start, idx + q.length + 20))}...</div>
+                        <div class="match-text">${highlight(rawText)}...</div>
                     </div>`;
             }
             // 3. 単語ヒット
@@ -290,7 +337,7 @@ function performGlobalSearch() {
                     snippetHtml += `
                         <div class="match-row" onclick="event.stopPropagation(); openArticleAndJump(${item.id}, ${w.id}, 'word')">
                             <span class="match-tag word-tag">単語</span>
-                            <div class="match-text">${highlight(w.word)}: ${w.meaning}</div>
+                            <div class="match-text">${highlight(w.word)}: ${highlight(w.meaning)}</div>
                         </div>`;
                 }
             });
@@ -317,7 +364,21 @@ function performGlobalSearch() {
     }); 
 }
 
-// 検索結果から直接ジャンプするための補助関数
+// ★追加: 本文ヒット時に記事を開いてハイライト検索を実行する関数
+function openArticleAndSearch(articleId, query) {
+    openArticle(articleId);
+    
+    // 記事が開いた直後に検索を実行
+    setTimeout(() => {
+        const searchInput = document.getElementById('reader-search-input');
+        if(searchInput) {
+            searchInput.value = query; // 検索ボックスに値を入れる
+            searchInText();            // 本文内検索を実行（これで黄色くなります）
+        }
+    }, 100);
+}
+
+// 検索結果から単語・ノートへ直接ジャンプする関数
 function openArticleAndJump(articleId, itemId, type) {
     openArticle(articleId);
     // サイドパネルが開くのを少し待ってからジャンプ
@@ -325,6 +386,7 @@ function openArticleAndJump(articleId, itemId, type) {
         jumpToResult(itemId, type);
     }, 100);
 }
+
 
 // --- リーダー機能 ---
 function openArticle(id) {
