@@ -181,6 +181,23 @@ input, textarea, select { font-size: 16px !important; }
 .full-width-form textarea { height: 35vh; min-height: 200px; resize: none; }
 .input-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px; }
 
+/* 本棚エリア全体の設定 */
+#library-section {
+    flex: 1; /* 親要素（main-reader）の余白を埋める */
+    overflow-y: auto; /* 縦スクロールを許可 */
+    -webkit-overflow-scrolling: touch; /* スマホで滑らかに */
+    padding-bottom: 100px; /* 下のボタン（FAB）に被らないための余白 */
+}
+
+/* 本棚のヘッダーを固定したい場合はこれ（任意） */
+.library-header {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+    padding: 15px;
+}
+
 
 /* --- ライブラリ・カードデザイン (画像1枚目の再現) --- */
 .library-grid {
@@ -189,6 +206,7 @@ input, textarea, select { font-size: 16px !important; }
     gap: 15px;
     padding: 15px;
 }
+
 
 .item-card {
     background: white;
