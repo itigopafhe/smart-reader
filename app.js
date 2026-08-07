@@ -69,6 +69,7 @@ let importReviewSearchState = {
     matches: []
 };
 let currentTab = 'words', isAnkiMode = false, selectedText = "", editingId = null;
+let selectedReaderCapture = null;
 let readerSettings = { fontSize: 18, lineHeight: 1.8 };
 let movingItemId = null;
 let currentModalType = 'word';
@@ -79,8 +80,10 @@ let readerSearchState = {
     query: '',
     wholeWord: false,
     caseSensitive: false,
+    scope: 'chapter',
     currentIndex: -1,
-    matches: []
+    matches: [],
+    results: []
 };
 let globalVocabularyEditRef = null;
 let globalVocabularyState = {
@@ -91,6 +94,7 @@ let globalVocabularyState = {
     sourceId: 'all',
     chapterId: 'all',
     sort: 'newest',
+    grouped: false,
     ankiMode: false,
     ankiTarget: 'both',
     expandedKey: null
@@ -156,8 +160,18 @@ function toggleAnkiMode() {
 
 // 選択テキスト保持
 document.addEventListener('selectionchange', () => {
-    const sel = window.getSelection().toString().trim();
-    if (sel) selectedText = sel;
+    const selection = window.getSelection();
+    const text = selection ? selection.toString().trim() : '';
+    if (!text) return;
+    selectedText = text;
+
+    const display = document.getElementById('text-display');
+    const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+    if (display && range && display.contains(range.commonAncestorContainer)) {
+        selectedReaderCapture = captureReaderSelection(range, text);
+    } else {
+        selectedReaderCapture = null;
+    }
 });
 
 // --- ファイル読み込み関連 ---
@@ -967,8 +981,8 @@ function showLibrary() {
     }
     let html = `<span onclick="goToFolder(null)">🏠 本棚</span>`;
     path.forEach((f, idx) => {
-        if(idx === path.length -1) html += ` > <b>${f.name}</b>`;
-        else html += ` > <span onclick="goToFolder(${f.id})">${f.name}</span>`;
+        if(idx === path.length -1) html += ` > <b>${escapeHtml(f.name)}</b>`;
+        else html += ` > <span onclick="goToFolder(${f.id})">${escapeHtml(f.name)}</span>`;
     });
     bc.innerHTML = html;
 
@@ -977,7 +991,7 @@ function showLibrary() {
         card.className = `item-card ${item.type === 'folder' ? 'folder-icon' : 'article-icon'}`;
         card.onclick = () => item.type === 'folder' ? goToFolder(item.id) : openArticle(item.id);
         card.innerHTML = `
-            <h3>${item.name || "無題"}</h3>
+            <h3>${escapeHtml(item.name || "無題")}</h3>
             <div class="card-actions">
                 <button class="small-btn move" onclick="event.stopPropagation(); openMoveModal(${item.id})">移動</button>
                 <button class="small-btn del" onclick="event.stopPropagation(); deleteLibraryItem(${item.id})">削除</button>
@@ -1334,7 +1348,7 @@ function renderChapterNavigation() {
     });
 }
 
-async function switchToChapter(chapterId) {
+async function switchToChapter(chapterId, options = {}) {
     if (!currentArticle) return;
     const target = getCurrentChapters().find(chapter => String(chapter.id) === String(chapterId));
     if (!target) return;
@@ -1349,7 +1363,7 @@ async function switchToChapter(chapterId) {
     await saveToDB();
 
     currentChapterId = target.id;
-    resetReaderSearch();
+    if (!options.preserveSearch) resetReaderSearch();
     renderChapterNavigation();
     renderArticleText();
     renderList(currentTab, document.getElementById('list-search')?.value || '');
@@ -1365,7 +1379,7 @@ async function switchToChapter(chapterId) {
         currentArticle.readingPositions[targetId] = targetPosition;
     }
     await saveToDB();
-    restoreReadingPosition(savedPosition);
+    if (!options.skipPositionRestore) restoreReadingPosition(savedPosition);
 }
 
 function goToPreviousChapter() {
@@ -1414,7 +1428,9 @@ function renderArticleText() {
     const display = document.getElementById('text-display');
     const content = getCurrentChapterContent();
     const currentChapterIdForHighlight = getCurrentChapterId();
-    let html = content.split('\n').filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+    let html = getReaderParagraphs(content)
+        .map((paragraph, index) => `<p data-paragraph-index="${index}">${escapeHtml(paragraph)}</p>`)
+        .join('');
     
     // ハイライト置換 (ノート > 単語 の順で処理)
     const sn = [...currentArticle.notes].sort((a,b) => String(b.originalText || '').length - String(a.originalText || '').length);
@@ -1526,6 +1542,7 @@ function renderList(type, filter = '') {
     container.innerHTML = '';
 
     if (type === 'settings') { renderSettingsUI(container); return; }
+    renderArticleVocabularyStatistics(type);
 
     applyAnkiMaskClass(container, type === 'words' && isAnkiMode, document.getElementById('anki-target-select')?.value);
 
@@ -1539,7 +1556,12 @@ function renderList(type, filter = '') {
 
     list.forEach(item => {
         const card = document.createElement('div');
-        const highlight = (t) => filter ? t.replace(new RegExp(`(${filter})`, 'gi'), '<span class="text-highlight">$1</span>') : t;
+        const highlight = (t) => {
+            const safe = escapeHtml(t);
+            if (!filter) return safe;
+            const escapedFilter = escapeRegExp(escapeHtml(filter));
+            return safe.replace(new RegExp(`(${escapedFilter})`, 'gi'), '<span class="text-highlight">$1</span>');
+        };
         if (type === 'words') {
             card.id = `word-card-${item.id}`;
             card.className = `note-card compact-card ${item.memorized ? 'memorized-item' : ''}`;
@@ -1583,7 +1605,8 @@ async function handleUnifiedSave(e) {
             const values = {
                 word: document.getElementById('input-word-text').value,
                 meaning: document.getElementById('input-word-meaning').value,
-                memo: document.getElementById('input-word-memo').value
+                memo: document.getElementById('input-word-memo').value,
+                context: document.getElementById('input-word-context').value.trim()
             };
             if (editingId) {
                 const old = currentArticle.words.find(i => i.id === editingId);
@@ -1600,6 +1623,9 @@ async function handleUnifiedSave(e) {
             } else {
                 const word = Object.assign({ id: Date.now(), memorized: false, createdAt: Date.now() }, values);
                 if (activeChapterId) word.chapterId = activeChapterId;
+                if (selectedReaderCapture?.anchor && selectedText === selectedReaderCapture.anchor.selectedText) {
+                    word.anchor = selectedReaderCapture.anchor;
+                }
                 currentArticle.words.push(word);
             }
         } else {
@@ -1643,6 +1669,7 @@ function editItem(id, type) {
         document.getElementById('input-word-text').value = item.word;
         document.getElementById('input-word-meaning').value = item.meaning;
         document.getElementById('input-word-memo').value = item.memo || '';
+        document.getElementById('input-word-context').value = item.context || '';
     } else {
         document.getElementById('input-note-eng').value = item.originalText;
         document.getElementById('input-note-trans').value = item.translation;
@@ -1664,6 +1691,7 @@ function openUnifiedModal() {
     document.getElementById('input-word-text').value = selectedText || "";
     document.getElementById('input-word-meaning').value = "";
     document.getElementById('input-word-memo').value = "";
+    document.getElementById('input-word-context').value = selectedReaderCapture?.context || '';
     document.getElementById('input-note-eng').value = selectedText || "";
     document.getElementById('input-note-trans').value = "";
     document.getElementById('input-note-extra').value = "";
@@ -1700,6 +1728,64 @@ function escapeHtml(value) {
 
 function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getReaderParagraphs(content) {
+    return String(content ?? '').replace(/\r\n?/g, '\n').split('\n').filter(paragraph => paragraph.trim());
+}
+
+function getReaderParagraphElement(node) {
+    const element = node?.nodeType === 1 ? node : node?.parentElement;
+    return element?.closest ? element.closest('#text-display p[data-paragraph-index]') : null;
+}
+
+function getTextOffsetInElement(element, node, offset) {
+    if (!element || !node) return 0;
+    try {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.setEnd(node, offset);
+        return range.toString().length;
+    } catch (error) {
+        return 0;
+    }
+}
+
+function extractSentenceContext(text, startOffset = 0, endOffset = startOffset) {
+    const value = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (!value) return '';
+    const start = Math.max(0, Math.min(Number(startOffset) || 0, value.length));
+    const end = Math.max(start, Math.min(Number(endOffset) || start, value.length));
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const boundaryBefore = Math.max(before.lastIndexOf('. '), before.lastIndexOf('! '), before.lastIndexOf('? '));
+    const boundaryAfter = [after.indexOf('.'), after.indexOf('!'), after.indexOf('?')]
+        .filter(index => index >= 0)
+        .sort((left, right) => left - right)[0];
+    const sentenceStart = boundaryBefore >= 0 ? boundaryBefore + 2 : 0;
+    const sentenceEnd = boundaryAfter === undefined ? value.length : end + boundaryAfter + 1;
+    const sentence = value.slice(sentenceStart, sentenceEnd).trim();
+    return sentence || value;
+}
+
+function captureReaderSelection(range, selected) {
+    const paragraph = getReaderParagraphElement(range.startContainer);
+    if (!paragraph) return null;
+    const paragraphText = String(paragraph.textContent || '');
+    const textOffset = getTextOffsetInElement(paragraph, range.startContainer, range.startOffset);
+    const selectedText = String(selected || '').trim();
+    const endOffset = textOffset + selectedText.length;
+    return {
+        context: extractSentenceContext(paragraphText, textOffset, endOffset),
+        anchor: {
+            chapterId: getCurrentChapterId(),
+            paragraphIndex: Number(paragraph.dataset.paragraphIndex) || 0,
+            textOffset,
+            selectedText,
+            prefix: paragraphText.slice(Math.max(0, textOffset - 80), textOffset),
+            suffix: paragraphText.slice(endOffset, endOffset + 80)
+        }
+    };
 }
 
 function applyAnkiMaskClass(container, active, target) {
@@ -1806,6 +1892,19 @@ function rerenderReaderAtPosition(position) {
     renderArticleText();
 
     if (readerSearchState.query) {
+        if (isBookWideSearchActive()) {
+            readerSearchState.results = buildBookSearchResults(
+                currentArticle,
+                readerSearchState.query,
+                readerSearchState.wholeWord,
+                readerSearchState.caseSensitive
+            );
+            const index = Math.max(0, Math.min(previousSearchIndex >= 0 ? previousSearchIndex : 0, readerSearchState.results.length - 1));
+            if (readerSearchState.results.length) void setBookSearchResult(index, false);
+            else updateSearchCount();
+            restoreReadingPosition(position);
+            return;
+        }
         applySearchHighlights();
         if (readerSearchState.matches.length > 0) {
             const index = Math.max(0, Math.min(
@@ -1848,11 +1947,19 @@ function flushReadingPositionSave() {
 
 async function saveToDB() { await db.setItem('library_items', libraryItems); }
 function hideAllSections() { ['library-section', 'vocabulary-section', 'input-area', 'import-review-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
-function closeModal() { document.getElementById('unified-modal-overlay').classList.remove('show'); editingId = null; globalVocabularyEditRef = null; }
+function closeModal() {
+    document.getElementById('unified-modal-overlay').classList.remove('show');
+    editingId = null;
+    globalVocabularyEditRef = null;
+    selectedReaderCapture = null;
+}
 function togglePanel() { document.getElementById('side-panel').classList.toggle('is-open'); }
 function countEnglishWords(text) {
-    const matches = String(text ?? '').match(/[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+(?:['’][A-Za-z]+)*)*/g);
-    return matches ? matches.length : 0;
+    return getEnglishTokens(text).length;
+}
+
+function getEnglishTokens(text) {
+    return String(text ?? '').match(/[A-Za-z]+(?:['’][A-Za-z]+)*(?:-[A-Za-z]+(?:['’][A-Za-z]+)*)*/g) || [];
 }
 
 function getArticleFullText(article) {
@@ -1871,6 +1978,30 @@ function getReaderWordCounts(article = currentArticle) {
         chapter: countEnglishWords(chapterText),
         book: countEnglishWords(getArticleFullText(article))
     };
+}
+
+function normalizeVocabularyWord(value) {
+    return String(value ?? '').trim().toLocaleLowerCase();
+}
+
+function getArticleVocabularyStatistics(article = currentArticle) {
+    const words = Array.isArray(article?.words) ? article.words : [];
+    return {
+        total: words.length,
+        unique: new Set(words.map(word => normalizeVocabularyWord(word.word)).filter(Boolean)).size,
+        memorized: words.filter(word => !!word.memorized).length
+    };
+}
+
+function renderArticleVocabularyStatistics(type = currentTab) {
+    const target = document.getElementById('article-vocabulary-statistics');
+    if (!target) return;
+    if (!currentArticle || type !== 'words') {
+        target.textContent = '';
+        return;
+    }
+    const stats = getArticleVocabularyStatistics(currentArticle);
+    target.textContent = `${stats.total} words · ${stats.unique} unique · ${stats.memorized} memorized`;
 }
 
 function updateProgress(event, forceWordCount = false) {
@@ -1925,13 +2056,157 @@ function openMoveModal(id) { movingItemId = id; const item = libraryItems.find(i
 async function submitMove() { if(!movingItemId) return; const val = document.getElementById('move-select').value; const pid = val?parseInt(val):null; const item = libraryItems.find(i=>i.id===movingItemId); if(item){ item.parentId=pid; await saveToDB(); document.getElementById('move-modal-overlay').classList.remove('show'); showLibrary(); } }
 function exportToCSV() { if (!currentArticle || currentArticle.words.length === 0) { alert("データなし"); return; } let csv = "Word,Meaning,Memo\n"; currentArticle.words.forEach(i => { const e=t=>t?`"${t.replace(/"/g, '""')}"`:""; csv+=`${e(i.word)},${e(i.meaning)},${e(i.memo)}\n`; }); const b = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: 'text/csv' }); const l = document.createElement("a"); l.href=URL.createObjectURL(b); l.download="words.csv"; l.click(); }
 
+const COMMON_FREQUENCY_WORDS = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'of', 'to', 'in', 'on', 'for', 'with', 'at', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'that', 'this', 'as', 'i', 'you', 'he', 'she', 'we', 'they', 'his', 'her', 'their', 'my', 'your', 'not', 'do', 'does', 'did', 'have', 'has', 'had']);
+
+function getWordFrequency(article, excludeCommon = false) {
+    const counts = new Map();
+    getEnglishTokens(getArticleFullText(article)).forEach(token => {
+        const word = token.toLocaleLowerCase();
+        if (excludeCommon && COMMON_FREQUENCY_WORDS.has(word)) return;
+        counts.set(word, (counts.get(word) || 0) + 1);
+    });
+    return Array.from(counts, ([word, count]) => ({ word, count }))
+        .sort((left, right) => right.count - left.count || left.word.localeCompare(right.word));
+}
+
+function openWordStatistics() {
+    if (!currentArticle) return;
+    document.getElementById('word-statistics-overlay')?.classList.add('show');
+    renderWordStatistics();
+}
+
+function closeWordStatistics() {
+    document.getElementById('word-statistics-overlay')?.classList.remove('show');
+}
+
+function renderWordStatistics() {
+    const container = document.getElementById('word-statistics-list');
+    const summary = document.getElementById('word-statistics-summary');
+    if (!container || !currentArticle) return;
+    const excludeCommon = !!document.getElementById('frequency-exclude-common')?.checked;
+    const frequency = getWordFrequency(currentArticle, excludeCommon).slice(0, 80);
+    const total = countEnglishWords(getArticleFullText(currentArticle));
+    if (summary) summary.textContent = `${total.toLocaleString()} words · ${frequency.length} 件を表示`;
+    container.innerHTML = '';
+    frequency.forEach(entry => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'word-frequency-row';
+        const registered = currentArticle.words.some(word => normalizeVocabularyWord(word.word) === entry.word);
+        row.textContent = `${entry.word}  ${entry.count}${registered ? ' · 登録済み' : ''}`;
+        row.onclick = () => openFrequencyWord(entry.word);
+        container.appendChild(row);
+    });
+}
+
+function openFrequencyWord(word) {
+    const text = getCurrentChapterContent();
+    const matchIndex = text.toLocaleLowerCase().indexOf(String(word).toLocaleLowerCase());
+    selectedText = word;
+    selectedReaderCapture = {
+        context: extractSentenceContext(text, Math.max(0, matchIndex), Math.max(0, matchIndex) + word.length),
+        anchor: null
+    };
+    closeWordStatistics();
+    openUnifiedModal();
+}
+
+function getLibraryBackupCounts(items = libraryItems) {
+    const articles = (items || []).filter(item => item?.type === 'article');
+    return {
+        articles: articles.length,
+        folders: (items || []).filter(item => item?.type === 'folder').length,
+        words: articles.reduce((sum, article) => sum + (Array.isArray(article.words) ? article.words.length : 0), 0),
+        notes: articles.reduce((sum, article) => sum + (Array.isArray(article.notes) ? article.notes.length : 0), 0)
+    };
+}
+
+function createSmartReaderBackup() {
+    return {
+        app: 'Smart Reader',
+        backupVersion: 1,
+        exportedAt: new Date().toISOString(),
+        library_items: libraryItems,
+        reader_settings: readerSettings
+    };
+}
+
+function validateSmartReaderBackup(data) {
+    if (!data || data.app !== 'Smart Reader' || data.backupVersion !== 1 || !Array.isArray(data.library_items)) {
+        return { valid: false, error: 'Smart Readerのバックアップ形式ではありません。' };
+    }
+    if (data.reader_settings !== undefined && (typeof data.reader_settings !== 'object' || Array.isArray(data.reader_settings))) {
+        return { valid: false, error: 'reader_settingsの形式が不正です。' };
+    }
+    if (!data.library_items.every(item => item && typeof item === 'object' && typeof item.type === 'string')) {
+        return { valid: false, error: 'ライブラリ項目の形式が不正です。' };
+    }
+    return { valid: true, counts: getLibraryBackupCounts(data.library_items) };
+}
+
+function exportSmartReaderBackup() {
+    const json = JSON.stringify(createSmartReaderBackup(), null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `smart-reader-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function openSmartReaderRestore() {
+    const input = document.getElementById('backup-file-input');
+    if (input) input.click();
+}
+
+async function handleSmartReaderRestore(event) {
+    const file = event?.target?.files?.[0];
+    if (!file) return;
+    try {
+        const data = JSON.parse(await file.text());
+        const validation = validateSmartReaderBackup(data);
+        if (!validation.valid) {
+            alert(validation.error);
+            return;
+        }
+        const counts = validation.counts;
+        if (!confirm(`現在のデータを置き換えます。\n記事: ${counts.articles}\nフォルダ: ${counts.folders}\n単語: ${counts.words}\nノート: ${counts.notes}\n\n続行しますか？`)) return;
+        const previousItems = libraryItems;
+        const previousSettings = readerSettings;
+        try {
+            await db.setItem('library_items', data.library_items);
+            await db.setItem('reader_settings', data.reader_settings || previousSettings);
+            libraryItems = data.library_items;
+            readerSettings = data.reader_settings || previousSettings;
+            currentArticle = null;
+            currentChapterId = null;
+            currentFolderId = null;
+            applySettings();
+            showLibrary();
+            alert('バックアップを復元しました。');
+        } catch (error) {
+            libraryItems = previousItems;
+            readerSettings = previousSettings;
+            throw error;
+        }
+    } catch (error) {
+        console.error(error);
+        alert('復元できませんでした。JSONファイルを確認してください。');
+    } finally {
+        event.target.value = '';
+    }
+}
+
 function resetReaderSearch() {
     readerSearchState = {
         query: '',
         wholeWord: false,
         caseSensitive: false,
+        scope: 'chapter',
         currentIndex: -1,
-        matches: []
+        matches: [],
+        results: []
     };
     const input = document.getElementById('reader-search-input');
     const wholeWord = document.getElementById('search-whole-word');
@@ -1939,12 +2214,31 @@ function resetReaderSearch() {
     if (input) input.value = '';
     if (wholeWord) wholeWord.checked = false;
     if (caseSensitive) caseSensitive.checked = false;
+    updateReaderSearchScopeUI();
     updateSearchCount();
+}
+
+function updateReaderSearchScopeUI() {
+    const scope = document.getElementById('reader-search-scope');
+    if (!scope) return;
+    const canSearchBook = hasStoredChapters(currentArticle) && getCurrentChapters().length > 1;
+    scope.style.display = canSearchBook ? '' : 'none';
+    if (!canSearchBook) readerSearchState.scope = 'chapter';
+    scope.value = readerSearchState.scope || 'chapter';
+}
+
+function changeReaderSearchScope(value) {
+    readerSearchState.scope = value === 'book' && hasStoredChapters(currentArticle) ? 'book' : 'chapter';
+    searchInText();
+}
+
+function isBookWideSearchActive() {
+    return readerSearchState.scope === 'book' && hasStoredChapters(currentArticle);
 }
 
 function updateSearchCount() {
     const count = document.getElementById('search-count');
-    const total = readerSearchState.matches.length;
+    const total = isBookWideSearchActive() ? readerSearchState.results.length : readerSearchState.matches.length;
     const current = total > 0 && readerSearchState.currentIndex >= 0
         ? readerSearchState.currentIndex + 1
         : 0;
@@ -1978,6 +2272,26 @@ function findSearchMatches(text, query, wholeWord, caseSensitive) {
         start = index + Math.max(needle.length, 1);
     }
     return matches;
+}
+
+function buildBookSearchResults(article, query, wholeWord, caseSensitive) {
+    if (!article || !query) return [];
+    const results = [];
+    getArticleChapters(article).forEach((chapter, chapterIndex) => {
+        getReaderParagraphs(chapter.content).forEach((paragraph, paragraphIndex) => {
+            findSearchMatches(paragraph, query, wholeWord, caseSensitive).forEach((hit, matchIndexInParagraph) => {
+                results.push({
+                    chapterId: chapter.id,
+                    chapterIndex,
+                    paragraphIndex,
+                    textOffset: hit.index,
+                    length: hit.length,
+                    matchIndexInParagraph
+                });
+            });
+        });
+    });
+    return results;
 }
 
 function applySearchHighlights() {
@@ -2021,11 +2335,15 @@ function applySearchHighlights() {
     });
 
     readerSearchState.matches = matches;
-    if (readerSearchState.currentIndex >= matches.length) readerSearchState.currentIndex = -1;
+    if (!isBookWideSearchActive() && readerSearchState.currentIndex >= matches.length) readerSearchState.currentIndex = -1;
     updateSearchCount();
 }
 
 function setActiveSearchResult(index, shouldScroll = true) {
+    if (isBookWideSearchActive()) {
+        void setBookSearchResult(index, shouldScroll);
+        return;
+    }
     const matches = readerSearchState.matches;
     if (matches.length === 0) {
         readerSearchState.currentIndex = -1;
@@ -2041,13 +2359,36 @@ function setActiveSearchResult(index, shouldScroll = true) {
     updateSearchCount();
 }
 
+async function setBookSearchResult(index, shouldScroll = true) {
+    const results = readerSearchState.results;
+    if (!results.length) {
+        readerSearchState.currentIndex = -1;
+        updateSearchCount();
+        return;
+    }
+    readerSearchState.currentIndex = (index + results.length) % results.length;
+    const result = results[readerSearchState.currentIndex];
+    if (String(result.chapterId) !== String(getCurrentChapterId())) {
+        await switchToChapter(result.chapterId, { preserveSearch: true, skipPositionRestore: true });
+    }
+    applySearchHighlights();
+    const paragraph = document.querySelector(`#text-display p[data-paragraph-index="${result.paragraphIndex}"]`);
+    const match = paragraph ? paragraph.querySelectorAll('.search-match')[result.matchIndexInParagraph] : null;
+    document.querySelectorAll('.current-search-match').forEach(element => element.classList.remove('current-search-match'));
+    if (match) {
+        match.classList.add('current-search-match');
+        if (shouldScroll) match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    updateSearchCount();
+}
+
 function nextSearchResult() {
-    if (readerSearchState.matches.length === 0) return;
+    if ((isBookWideSearchActive() ? readerSearchState.results : readerSearchState.matches).length === 0) return;
     setActiveSearchResult(readerSearchState.currentIndex + 1);
 }
 
 function previousSearchResult() {
-    if (readerSearchState.matches.length === 0) return;
+    if ((isBookWideSearchActive() ? readerSearchState.results : readerSearchState.matches).length === 0) return;
     setActiveSearchResult(readerSearchState.currentIndex < 0
         ? readerSearchState.matches.length - 1
         : readerSearchState.currentIndex - 1);
@@ -2065,6 +2406,9 @@ function searchInText() {
     readerSearchState.caseSensitive = !!caseSensitive?.checked;
     readerSearchState.currentIndex = -1;
     readerSearchState.matches = [];
+    readerSearchState.results = isBookWideSearchActive()
+        ? buildBookSearchResults(currentArticle, query, readerSearchState.wholeWord, readerSearchState.caseSensitive)
+        : [];
 
     renderArticleText();
     if (!query) {
@@ -2074,7 +2418,8 @@ function searchInText() {
     }
 
     applySearchHighlights();
-    if (readerSearchState.matches.length > 0) setActiveSearchResult(0);
+    if (isBookWideSearchActive() && readerSearchState.results.length > 0) void setBookSearchResult(0);
+    else if (readerSearchState.matches.length > 0) setActiveSearchResult(0);
     else restoreReadingPosition(position);
 }
 
@@ -2221,6 +2566,25 @@ function getFilteredGlobalVocabulary() {
     return entries;
 }
 
+function getGlobalVocabularyStatistics(entries = globalVocabularyState.entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    return {
+        total: list.length,
+        unique: new Set(list.map(entry => normalizeVocabularyWord(entry.wordText)).filter(Boolean)).size,
+        memorized: list.filter(entry => entry.memorized).length
+    };
+}
+
+function groupGlobalVocabularyEntries(entries) {
+    const groups = new Map();
+    (entries || []).forEach(entry => {
+        const key = normalizeVocabularyWord(entry.wordText) || `__empty__${entry.key}`;
+        if (!groups.has(key)) groups.set(key, { key, wordText: entry.wordText, entries: [] });
+        groups.get(key).entries.push(entry);
+    });
+    return Array.from(groups.values());
+}
+
 function renderGlobalVocabularyControls() {
     const state = globalVocabularyState;
     const sourceSelect = document.getElementById('global-vocab-source');
@@ -2284,12 +2648,14 @@ function renderGlobalVocabularyControls() {
     const sortSelect = document.getElementById('global-vocab-sort');
     const ankiInput = document.getElementById('global-vocab-anki');
     const ankiTarget = document.getElementById('global-vocab-anki-target');
+    const groupedInput = document.getElementById('global-vocab-grouped');
     if (queryInput) queryInput.value = state.query;
     if (exactInput) exactInput.checked = state.exact;
     if (statusSelect) statusSelect.value = state.status;
     if (sortSelect) sortSelect.value = state.sort;
     if (ankiInput) ankiInput.checked = state.ankiMode;
     if (ankiTarget) ankiTarget.value = state.ankiTarget;
+    if (groupedInput) groupedInput.checked = state.grouped;
 }
 
 function addGlobalVocabularyDetail(container, label, value) {
@@ -2391,6 +2757,48 @@ function createGlobalVocabularyCard(entry) {
     return card;
 }
 
+function createGlobalVocabularyGroupCard(group) {
+    const card = document.createElement('article');
+    const memorized = group.entries.filter(entry => entry.memorized).length;
+    const expanded = globalVocabularyState.expandedKey === `group:${group.key}`;
+    card.className = 'note-card compact-card global-vocabulary-card global-vocabulary-group';
+    const summary = document.createElement('div');
+    summary.className = 'word-row global-vocabulary-summary';
+    const word = document.createElement('span');
+    word.className = 'word-text';
+    word.textContent = group.wordText;
+    const label = document.createElement('div');
+    label.className = 'meaning-right global-vocabulary-group-count';
+    const meanings = Array.from(new Set(group.entries.map(entry => entry.meaning).filter(Boolean)));
+    const meaningLabel = meanings.length <= 1 ? (meanings[0] || '') : `${meanings.length} meanings`;
+    label.textContent = `${meaningLabel} · × ${group.entries.length} · ${memorized}/${group.entries.length} 暗記済み`;
+    summary.append(word, label);
+    summary.addEventListener('click', () => {
+        globalVocabularyState.expandedKey = expanded ? null : `group:${group.key}`;
+        renderGlobalVocabulary();
+    });
+    card.appendChild(summary);
+    if (!expanded) return card;
+
+    const actions = document.createElement('div');
+    actions.className = 'global-vocabulary-actions global-vocabulary-group-actions';
+    const markAll = document.createElement('button');
+    markAll.className = 'small-btn';
+    markAll.textContent = 'すべて暗記済みにする';
+    markAll.onclick = () => void setGlobalGroupMemorized(group.key, true);
+    const clearAll = document.createElement('button');
+    clearAll.className = 'small-btn';
+    clearAll.textContent = 'すべて未暗記にする';
+    clearAll.onclick = () => void setGlobalGroupMemorized(group.key, false);
+    actions.append(markAll, clearAll);
+    card.appendChild(actions);
+    const entries = document.createElement('div');
+    entries.className = 'global-vocabulary-group-entries';
+    group.entries.forEach(entry => entries.appendChild(createGlobalVocabularyCard(entry)));
+    card.appendChild(entries);
+    return card;
+}
+
 function renderGlobalVocabulary() {
     const container = document.getElementById('global-vocabulary-list');
     if (!container) return;
@@ -2404,6 +2812,13 @@ function renderGlobalVocabulary() {
             ? total.toLocaleString() + ' words'
             : entries.length.toLocaleString() + ' / ' + total.toLocaleString() + ' words';
     }
+    const statsTarget = document.getElementById('global-vocab-statistics');
+    if (statsTarget) {
+        const filteredStats = getGlobalVocabularyStatistics(entries);
+        const allStats = getGlobalVocabularyStatistics(globalVocabularyState.entries);
+        const prefix = entries.length === total ? '' : `${filteredStats.total} / ${allStats.total} entries · `;
+        statsTarget.textContent = `${prefix}${filteredStats.unique} unique · ${filteredStats.memorized} memorized · ${filteredStats.total - filteredStats.memorized} unmemorized`;
+    }
 
     applyAnkiMaskClass(container, globalVocabularyState.ankiMode, globalVocabularyState.ankiTarget);
     container.innerHTML = '';
@@ -2414,7 +2829,11 @@ function renderGlobalVocabulary() {
         container.appendChild(empty);
         return;
     }
-    entries.forEach(entry => container.appendChild(createGlobalVocabularyCard(entry)));
+    if (globalVocabularyState.grouped && !globalVocabularyState.ankiMode) {
+        groupGlobalVocabularyEntries(entries).forEach(group => container.appendChild(createGlobalVocabularyGroupCard(group)));
+    } else {
+        entries.forEach(entry => container.appendChild(createGlobalVocabularyCard(entry)));
+    }
 }
 
 function showGlobalVocabulary() {
@@ -2449,6 +2868,12 @@ function toggleGlobalAnkiMode() {
     renderGlobalVocabulary();
 }
 
+function toggleGlobalVocabularyGrouping() {
+    globalVocabularyState.grouped = !!document.getElementById('global-vocab-grouped')?.checked;
+    globalVocabularyState.expandedKey = null;
+    renderGlobalVocabulary();
+}
+
 function updateGlobalAnkiTarget(value) {
     globalVocabularyState.ankiTarget = value || 'both';
     renderGlobalVocabulary();
@@ -2460,6 +2885,17 @@ async function toggleGlobalMemorized(key, event) {
     const source = getGlobalEntrySource(entry);
     if (!source) return;
     source.word.memorized = !source.word.memorized;
+    await saveToDB();
+    globalVocabularyState.entries = collectGlobalVocabulary();
+    renderGlobalVocabulary();
+}
+
+async function setGlobalGroupMemorized(groupKey, memorized) {
+    const entries = globalVocabularyState.entries.filter(entry => normalizeVocabularyWord(entry.wordText) === groupKey);
+    entries.forEach(entry => {
+        const source = getGlobalEntrySource(entry);
+        if (source) source.word.memorized = memorized;
+    });
     await saveToDB();
     globalVocabularyState.entries = collectGlobalVocabulary();
     renderGlobalVocabulary();
@@ -2479,6 +2915,7 @@ function openGlobalVocabularyWordEditor(key) {
     document.getElementById('input-word-text').value = source.word.word || '';
     document.getElementById('input-word-meaning').value = source.word.meaning || '';
     document.getElementById('input-word-memo').value = source.word.memo || '';
+    document.getElementById('input-word-context').value = source.word.context || '';
     document.getElementById('unified-modal-overlay').classList.add('show');
 }
 
@@ -2504,7 +2941,8 @@ async function saveGlobalVocabularyWordFromModal() {
     article.words[wordIndex] = Object.assign({}, oldWord, {
         word: document.getElementById('input-word-text').value,
         meaning: document.getElementById('input-word-meaning').value,
-        memo: document.getElementById('input-word-memo').value
+        memo: document.getElementById('input-word-memo').value,
+        context: document.getElementById('input-word-context').value.trim()
     });
     await saveToDB();
     closeModal();
@@ -2538,6 +2976,65 @@ function getGlobalWordPosition(word) {
     return null;
 }
 
+function findAnchorInParagraphs(paragraphs, anchor, context = '') {
+    const list = Array.isArray(paragraphs) ? paragraphs.map(value => String(value ?? '')) : [];
+    const selectedText = String(anchor?.selectedText || '').trim();
+    const paragraphIndex = Number.isInteger(anchor?.paragraphIndex) ? anchor.paragraphIndex : -1;
+    const textOffset = Number.isFinite(anchor?.textOffset) ? anchor.textOffset : -1;
+    const tryParagraph = (index, source) => {
+        const paragraph = list[index];
+        if (paragraph === undefined) return null;
+        if (selectedText && textOffset >= 0 && paragraph.slice(textOffset, textOffset + selectedText.length) === selectedText) {
+            return { paragraphIndex: index, textOffset, length: selectedText.length, source };
+        }
+        if (selectedText) {
+            const indexInParagraph = paragraph.indexOf(selectedText);
+            if (indexInParagraph >= 0) return { paragraphIndex: index, textOffset: indexInParagraph, length: selectedText.length, source: `${source}-text` };
+        }
+        return null;
+    };
+    if (paragraphIndex >= 0) {
+        const exact = tryParagraph(paragraphIndex, 'anchor');
+        if (exact) return exact;
+    }
+    const needle = String(context || '').trim();
+    if (needle) {
+        for (let index = 0; index < list.length; index += 1) {
+            const offset = list[index].indexOf(needle);
+            if (offset >= 0) return { paragraphIndex: index, textOffset: offset, length: needle.length, source: 'context' };
+        }
+    }
+    if (anchor?.prefix || anchor?.suffix) {
+        for (let index = 0; index < list.length; index += 1) {
+            const prefixIndex = anchor.prefix ? list[index].indexOf(anchor.prefix) : 0;
+            const suffixIndex = anchor.suffix ? list[index].indexOf(anchor.suffix, Math.max(0, prefixIndex)) : -1;
+            if (prefixIndex >= 0 && (suffixIndex >= 0 || !anchor.suffix)) {
+                return { paragraphIndex: index, textOffset: prefixIndex + String(anchor.prefix || '').length, length: selectedText.length, source: 'surrounding-text' };
+            }
+        }
+    }
+    if (paragraphIndex >= 0 && list[paragraphIndex] !== undefined && textOffset >= 0) {
+        return { paragraphIndex, textOffset: Math.min(textOffset, list[paragraphIndex].length), length: selectedText.length, source: 'paragraph-offset' };
+    }
+    return null;
+}
+
+function flashReaderAnchor(resolution, word) {
+    const display = document.getElementById('text-display');
+    const paragraph = display?.querySelector(`p[data-paragraph-index="${resolution.paragraphIndex}"]`);
+    if (!paragraph) return false;
+    paragraph.classList.add('temporary-reader-anchor');
+    const wordTarget = Array.from(paragraph.querySelectorAll('[data-jump-id]')).find(element =>
+        globalIdsEqual(element.dataset.jumpId, word.id) && element.dataset.type === 'word');
+    if (wordTarget) wordTarget.classList.add('temporary-reader-highlight');
+    paragraph.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => {
+        paragraph.classList.remove('temporary-reader-anchor');
+        wordTarget?.classList.remove('temporary-reader-highlight');
+    }, 2500);
+    return true;
+}
+
 function openGlobalVocabularyEntry(key) {
     const entry = findGlobalEntry(key);
     const source = getGlobalEntrySource(entry);
@@ -2550,6 +3047,10 @@ function openGlobalVocabularyEntry(key) {
             await switchToChapter(entry.chapterId);
         }
 
+        const paragraphs = getReaderParagraphs(getCurrentChapterContent());
+        const resolution = findAnchorInParagraphs(paragraphs, source.word.anchor, source.word.context);
+        if (resolution && flashReaderAnchor(resolution, source.word)) return;
+
         const position = getGlobalWordPosition(source.word);
         if (position) restoreReadingPosition(position);
 
@@ -2559,7 +3060,11 @@ function openGlobalVocabularyEntry(key) {
                 globalIdsEqual(element.dataset.jumpId, source.word.id) &&
                 element.dataset.type === 'word')
             : null;
-        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (target) {
+            target.classList.add('temporary-reader-highlight');
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => target.classList.remove('temporary-reader-highlight'), 2500);
+        }
     }, 120);
 }
 
@@ -2584,14 +3089,16 @@ function exportGlobalVocabularyCSV() {
         alert('データなし');
         return;
     }
-    const header = ['Word', 'Meaning', 'Memo', 'Article', 'Chapter', 'Memorized'];
+    const header = ['Word', 'Meaning', 'Memo', 'Context', 'Article', 'Chapter', 'Memorized', 'CreatedAt'];
     const rows = entries.map(entry => [
         entry.wordText,
         entry.meaning,
         entry.memo,
+        entry.context || '',
         entry.articleTitle,
         entry.chapterTitle,
-        entry.memorized ? 'true' : 'false'
+        entry.memorized ? 'true' : 'false',
+        entry.createdAt || ''
     ]);
     const csv = [header, ...rows].map(row => row.map(globalCsvValue).join(',')).join('\r\n') + '\r\n';
     downloadGlobalVocabularyCsv(csv, 'global-vocabulary.csv');
