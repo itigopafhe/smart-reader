@@ -66,6 +66,17 @@
                 </div>
             </div>
 
+            <div id="chapter-navigation" class="chapter-navigation" style="display:none;">
+                <button id="chapter-prev-btn" type="button" onclick="goToPreviousChapter()" aria-label="前の章へ">‹</button>
+                <div class="chapter-picker">
+                    <button id="chapter-title-btn" type="button" onclick="toggleChapterDropdown(event)" aria-haspopup="listbox" aria-expanded="false">
+                        <span id="chapter-title">本文</span><span class="chapter-title-chevron" aria-hidden="true">▼</span>
+                    </button>
+                    <div id="chapter-dropdown" class="chapter-dropdown" role="listbox"></div>
+                </div>
+                <button id="chapter-next-btn" type="button" onclick="goToNextChapter()" aria-label="次の章へ">›</button>
+            </div>
+
             <div id="text-display" onclick="handleReaderClick(event)"></div>
 
         <div id="reading-status-bar" style="height: auto; flex-direction: column; padding: 10px;">
@@ -181,6 +192,6 @@
     </div>
 
     <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=2.6"></script>
 </body>
 </html>

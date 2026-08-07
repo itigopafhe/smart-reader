@@ -55,6 +55,8 @@ const SAMPLE_DATA = [
 const db = localforage.createInstance({ name: "ProjectA_DB_v3" });
 
 let libraryItems = [], currentFolderId = null, currentArticle = null;
+let currentChapterId = null;
+let readerWordCounts = { articleId: null, chapterId: null, chapter: 0, book: 0 };
 let currentTab = 'words', isAnkiMode = false, selectedText = "", editingId = null;
 let readerSettings = { fontSize: 18, lineHeight: 1.8 };
 let movingItemId = null;
@@ -86,7 +88,7 @@ async function init() {
         readerSettings = savedSet; 
         applySettings(); 
     }
-    
+
     showLibrary(); 
     renderList('words');
     setupEventListeners(); // リスナー設定を呼び出す
@@ -110,6 +112,11 @@ function setupEventListeners() {
     if (textDisplay) {
         textDisplay.onscroll = updateProgress;
     }
+
+    document.addEventListener('click', event => {
+        const navigation = document.getElementById('chapter-navigation');
+        if (navigation && !navigation.contains(event.target)) closeChapterDropdown();
+    });
 }
 
 // --- 新規追加: 暗記モードの切り替え ---
@@ -253,7 +260,9 @@ function editCurrentArticle() {
     document.getElementById('input-title-label').innerText = "記事を編集";
     document.getElementById('text-title').value = currentArticle.name; 
     document.getElementById('text-url').value = currentArticle.url || ""; 
-    document.getElementById('text-input').value = currentArticle.content; 
+    document.getElementById('text-input').value = typeof currentArticle.content === 'string' && currentArticle.content
+        ? currentArticle.content
+        : getArticleFullText(currentArticle);
     document.getElementById('input-area').style.display = 'block'; 
 }
 
@@ -402,6 +411,187 @@ function openArticleAndJump(articleId, itemId, type) {
 
 
 // --- リーダー機能 ---
+// --- 章データ互換レイヤー ---
+// 既存記事はarticle.contentを仮想的な1章として扱い、LocalForageの保存形式は変更しない。
+function getArticleChapters(article) {
+    if (!article) return [];
+
+    if (Array.isArray(article.chapters) && article.chapters.length > 0) {
+        const chapters = article.chapters
+            .filter(chapter => chapter && typeof chapter === 'object')
+            .map((chapter, index) => ({
+                id: chapter.id !== undefined && chapter.id !== null && String(chapter.id).trim()
+                    ? String(chapter.id)
+                    : `chapter-${index + 1}`,
+                title: typeof chapter.title === 'string' && chapter.title.trim()
+                    ? chapter.title
+                    : `Chapter ${index + 1}`,
+                content: typeof chapter.content === 'string' ? chapter.content : '',
+                order: Number.isFinite(Number(chapter.order)) ? Number(chapter.order) : index
+            }));
+        if (chapters.length > 0) return chapters.sort((a, b) => a.order - b.order);
+    }
+
+    return [{
+        id: 'legacy-main',
+        title: '本文',
+        content: typeof article.content === 'string' ? article.content : '',
+        order: 0,
+        isVirtual: true
+    }];
+}
+
+function hasStoredChapters(article = currentArticle) {
+    return !!(article && Array.isArray(article.chapters) && article.chapters.length > 0 && getArticleChapters(article).length > 0);
+}
+
+function getCurrentChapters() { return getArticleChapters(currentArticle); }
+
+function getCurrentChapter() {
+    const chapters = getCurrentChapters();
+    return chapters.find(chapter => String(chapter.id) === String(currentChapterId)) || chapters[0] || null;
+}
+
+function getCurrentChapterContent() {
+    const chapter = getCurrentChapter();
+    return chapter ? chapter.content : '';
+}
+
+function getCurrentChapterId() {
+    const chapter = getCurrentChapter();
+    return chapter ? String(chapter.id) : 'legacy-main';
+}
+
+function getInitialChapterId(article) {
+    const chapters = getArticleChapters(article);
+    const savedId = article?.readingPosition?.chapterId;
+    const savedChapter = chapters.find(chapter => savedId !== undefined && String(chapter.id) === String(savedId));
+    return savedChapter ? savedChapter.id : (chapters[0] ? chapters[0].id : null);
+}
+
+function getSavedPositionForChapter(article, chapterId) {
+    if (!article) return null;
+    const key = String(chapterId);
+    const positions = article.readingPositions;
+    if (positions && typeof positions === 'object' && positions[key]) return positions[key];
+
+    const latest = article.readingPosition;
+    if (!latest) return null;
+    if (latest.chapterId === undefined || latest.chapterId === null) {
+        return key === 'legacy-main' ? latest : null;
+    }
+    return String(latest.chapterId) === key ? latest : null;
+}
+
+function closeChapterDropdown() {
+    const dropdown = document.getElementById('chapter-dropdown');
+    const titleButton = document.getElementById('chapter-title-btn');
+    if (dropdown) dropdown.classList.remove('is-open');
+    if (titleButton) titleButton.setAttribute('aria-expanded', 'false');
+}
+
+function toggleChapterDropdown(event) {
+    if (event) event.stopPropagation();
+    const dropdown = document.getElementById('chapter-dropdown');
+    const titleButton = document.getElementById('chapter-title-btn');
+    if (!dropdown || !titleButton || getCurrentChapters().length <= 1) return;
+    const isOpen = dropdown.classList.toggle('is-open');
+    titleButton.setAttribute('aria-expanded', String(isOpen));
+}
+
+function renderChapterNavigation() {
+    const navigation = document.getElementById('chapter-navigation');
+    const title = document.getElementById('chapter-title');
+    const previous = document.getElementById('chapter-prev-btn');
+    const next = document.getElementById('chapter-next-btn');
+    const dropdown = document.getElementById('chapter-dropdown');
+    if (!navigation || !title || !previous || !next || !dropdown) return;
+
+    const chapters = getCurrentChapters();
+    const currentIndex = chapters.findIndex(chapter => String(chapter.id) === String(getCurrentChapterId()));
+    const currentChapter = chapters[currentIndex >= 0 ? currentIndex : 0];
+    const showNavigation = chapters.length > 1;
+    navigation.style.display = showNavigation ? 'flex' : 'none';
+    closeChapterDropdown();
+    if (!currentChapter) return;
+
+    title.textContent = currentChapter.title;
+    previous.disabled = !showNavigation || currentIndex <= 0;
+    next.disabled = !showNavigation || currentIndex >= chapters.length - 1;
+    dropdown.innerHTML = '';
+
+    if (!showNavigation) return;
+    chapters.forEach(chapter => {
+        const option = document.createElement('button');
+        const isCurrent = String(chapter.id) === String(currentChapter.id);
+        option.type = 'button';
+        option.className = `chapter-option${isCurrent ? ' is-current' : ''}`;
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(isCurrent));
+        const label = document.createElement('span');
+        label.textContent = chapter.title;
+        option.appendChild(label);
+        if (isCurrent) {
+            const check = document.createElement('span');
+            check.className = 'chapter-option-check';
+            check.textContent = '✓';
+            check.setAttribute('aria-hidden', 'true');
+            option.appendChild(check);
+        }
+        option.onclick = () => {
+            closeChapterDropdown();
+            void switchToChapter(chapter.id);
+        };
+        dropdown.appendChild(option);
+    });
+}
+
+async function switchToChapter(chapterId) {
+    if (!currentArticle) return;
+    const target = getCurrentChapters().find(chapter => String(chapter.id) === String(chapterId));
+    if (!target) return;
+    const targetId = String(target.id);
+    if (targetId === String(getCurrentChapterId())) {
+        closeChapterDropdown();
+        return;
+    }
+
+    // 章移動前に、移動元の章と書籍全体の最新位置を保存する。
+    rememberReadingPosition();
+    await saveToDB();
+
+    currentChapterId = target.id;
+    resetReaderSearch();
+    renderChapterNavigation();
+    renderArticleText();
+    renderList(currentTab, document.getElementById('list-search')?.value || '');
+    renderBookmarks();
+
+    const savedPosition = getSavedPositionForChapter(currentArticle, targetId);
+    const targetPosition = savedPosition
+        ? { ...savedPosition, chapterId: targetId, updatedAt: Date.now() }
+        : { chapterId: targetId, paragraphIndex: 0, paragraphOffset: 0, scrollRatio: 0, updatedAt: Date.now() };
+    currentArticle.readingPosition = targetPosition;
+    if (hasStoredChapters(currentArticle)) {
+        if (!currentArticle.readingPositions || typeof currentArticle.readingPositions !== 'object') currentArticle.readingPositions = {};
+        currentArticle.readingPositions[targetId] = targetPosition;
+    }
+    await saveToDB();
+    restoreReadingPosition(savedPosition);
+}
+
+function goToPreviousChapter() {
+    const chapters = getCurrentChapters();
+    const index = chapters.findIndex(chapter => String(chapter.id) === String(getCurrentChapterId()));
+    if (index > 0) void switchToChapter(chapters[index - 1].id);
+}
+
+function goToNextChapter() {
+    const chapters = getCurrentChapters();
+    const index = chapters.findIndex(chapter => String(chapter.id) === String(getCurrentChapterId()));
+    if (index >= 0 && index < chapters.length - 1) void switchToChapter(chapters[index + 1].id);
+}
+
 function openArticle(id) {
     const nextArticle = libraryItems.find(i => i.id === id);
     if (!nextArticle) return;
@@ -412,6 +602,7 @@ function openArticle(id) {
     currentArticle = nextArticle;
     ensureArticleCollections(currentArticle);
     if (!currentArticle) return;
+    currentChapterId = getInitialChapterId(currentArticle);
     hideAllSections();
     document.getElementById('reader-wrapper').style.display = 'flex';
     document.getElementById('back-to-library').style.display = 'inline-block';
@@ -420,22 +611,25 @@ function openArticle(id) {
     document.getElementById('display-url').style.display = currentArticle.url ? 'inline' : 'none';
 
     resetReaderSearch();
+    renderChapterNavigation();
     renderArticleText();
     renderList('words');
     renderBookmarks();
-    restoreReadingPosition(currentArticle.readingPosition);
+    restoreReadingPosition(getSavedPositionForChapter(currentArticle, currentChapterId));
 }
 
 function renderArticleText() {
     if(!currentArticle) return;
     ensureArticleCollections(currentArticle);
     const display = document.getElementById('text-display');
-    const content = typeof currentArticle.content === 'string' ? currentArticle.content : '';
+    const content = getCurrentChapterContent();
+    const currentChapterIdForHighlight = getCurrentChapterId();
     let html = content.split('\n').filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
     
     // ハイライト置換 (ノート > 単語 の順で処理)
     const sn = [...currentArticle.notes].sort((a,b) => String(b.originalText || '').length - String(a.originalText || '').length);
     sn.forEach(n => {
+        if (n.chapterId !== undefined && n.chapterId !== null && String(n.chapterId) !== currentChapterIdForHighlight) return;
         if (typeof n.originalText !== 'string' || n.originalText.length < 2) return;
         const escaped = escapeRegExp(escapeHtml(n.originalText));
         html = html.replace(new RegExp(`(${escaped})`, 'gi'), `<span class="note-highlight" data-jump-id="${n.id}" data-type="note">$1</span>`);
@@ -443,13 +637,14 @@ function renderArticleText() {
 
     const sw = [...currentArticle.words].sort((a,b) => String(b.word || '').length - String(a.word || '').length);
     sw.forEach(w => {
+        if (w.chapterId !== undefined && w.chapterId !== null && String(w.chapterId) !== currentChapterIdForHighlight) return;
         if (typeof w.word !== 'string' || w.word.length < 2) return;
         const escaped = escapeRegExp(escapeHtml(w.word));
         html = html.replace(new RegExp(`(?<!>)${escaped}(?!<)`, 'gi'), `<span class="word-highlight" data-jump-id="${w.id}" data-type="word">$&</span>`);
     });
 
     display.innerHTML = html;
-    updateProgress();
+    updateProgress(null, true);
 }
 
 function handleReaderClick(e) {
@@ -487,12 +682,16 @@ async function addBookmark() {
     if (!name.trim()) name = `${progress}% 付近`;
 
     if (!currentArticle.bookmarks) currentArticle.bookmarks = [];
-    currentArticle.bookmarks.push({ id: Date.now(), pIndex: targetIdx, label: name });
+    const bookmark = { id: Date.now(), pIndex: targetIdx, label: name };
+    if (hasStoredChapters(currentArticle)) bookmark.chapterId = getCurrentChapterId();
+    currentArticle.bookmarks.push(bookmark);
     await saveToDB();
     renderBookmarks();
     restoreReadingPosition(position);
 }
 
+// chapterId付きのしおりは対象章へ切り替えてから位置へ移動する。
+// 既存しおりはchapterIdがないため、現在章のしおりとして従来通り扱う。
 function renderBookmarks() {
     const container = document.getElementById('bookmark-list');
     if (!container || !currentArticle) return;
@@ -500,12 +699,26 @@ function renderBookmarks() {
     (currentArticle.bookmarks || []).forEach(bk => {
         const item = document.createElement('div');
         item.style = "background: white; border: 1px solid #ddd; padding: 6px 12px; border-radius: 20px; font-size: 0.75em; cursor: pointer; display: flex; align-items: center; gap: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);";
-        item.innerHTML = `<span onclick="jumpToBookmark(${bk.pIndex})">📍 ${bk.label}</span><span onclick="deleteBookmark(${bk.id})" style="color:#ccc; border-left:1px solid #eee; padding-left:4px;">✕</span>`;
+        const jump = document.createElement('span');
+        jump.textContent = `\u{1F4CD} ${bk.label || ''}`;
+        jump.onclick = () => void jumpToBookmark(bk.pIndex, bk.chapterId);
+        const remove = document.createElement('span');
+        remove.textContent = '\u00D7';
+        remove.style = 'color:#ccc; border-left:1px solid #eee; padding-left:4px;';
+        remove.onclick = event => {
+            event.stopPropagation();
+            void deleteBookmark(bk.id);
+        };
+        item.appendChild(jump);
+        item.appendChild(remove);
         container.appendChild(item);
     });
 }
 
-function jumpToBookmark(pIdx) {
+async function jumpToBookmark(pIdx, chapterId) {
+    if (chapterId !== undefined && chapterId !== null && String(chapterId) !== String(getCurrentChapterId())) {
+        await switchToChapter(chapterId);
+    }
     const ps = document.getElementById('text-display').querySelectorAll('p');
     if (ps[pIdx]) ps[pIdx].scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -573,16 +786,30 @@ async function handleUnifiedSave(e) {
     const readingPosition = rememberReadingPosition();
     try {
         if (currentModalType === 'word') {
+            const activeChapterId = getActiveChapterIdForItem();
             const w = { id: editingId || Date.now(), word: document.getElementById('input-word-text').value, meaning: document.getElementById('input-word-meaning').value, memo: document.getElementById('input-word-memo').value, memorized: false };
             if (editingId) {
                 const old = currentArticle.words.find(i => i.id === editingId);
                 if (old) w.memorized = old.memorized;
+                if (old?.chapterId !== undefined && old?.chapterId !== null) w.chapterId = old.chapterId;
+                else if (activeChapterId) w.chapterId = activeChapterId;
                 currentArticle.words = currentArticle.words.map(i => i.id === editingId ? w : i);
-            } else currentArticle.words.push(w);
+            } else {
+                if (activeChapterId) w.chapterId = activeChapterId;
+                currentArticle.words.push(w);
+            }
         } else {
+            const activeChapterId = getActiveChapterIdForItem();
             const n = { id: editingId || Date.now(), originalText: document.getElementById('input-note-eng').value, translation: document.getElementById('input-note-trans').value, extra: document.getElementById('input-note-extra').value };
-            if (editingId) currentArticle.notes = currentArticle.notes.map(i => i.id === editingId ? n : i);
-            else currentArticle.notes.push(n);
+            if (editingId) {
+                const old = currentArticle.notes.find(i => i.id === editingId);
+                if (old?.chapterId !== undefined && old?.chapterId !== null) n.chapterId = old.chapterId;
+                else if (activeChapterId) n.chapterId = activeChapterId;
+                currentArticle.notes = currentArticle.notes.map(i => i.id === editingId ? n : i);
+            } else {
+                if (activeChapterId) n.chapterId = activeChapterId;
+                currentArticle.notes.push(n);
+            }
         }
         await saveToDB();
         closeModal();
@@ -651,6 +878,10 @@ function ensureArticleCollections(article) {
     if (!Array.isArray(article.bookmarks)) article.bookmarks = [];
 }
 
+function getActiveChapterIdForItem() {
+    return hasStoredChapters(currentArticle) ? getCurrentChapterId() : null;
+}
+
 function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, char => ({
         '&': '&amp;',
@@ -671,6 +902,16 @@ function getReaderElementTop(element, container) {
     return elementRect.top - containerRect.top + container.scrollTop;
 }
 
+function storeReadingPosition(position) {
+    if (!position || !currentArticle) return;
+    currentArticle.readingPosition = position;
+    if (hasStoredChapters(currentArticle)) {
+        const chapterId = position.chapterId || getCurrentChapterId();
+        if (!currentArticle.readingPositions || typeof currentArticle.readingPositions !== 'object') currentArticle.readingPositions = {};
+        currentArticle.readingPositions[String(chapterId)] = position;
+    }
+}
+
 function captureReadingPosition() {
     const display = document.getElementById('text-display');
     if (!display || !currentArticle) return null;
@@ -687,17 +928,19 @@ function captureReadingPosition() {
         ? getReaderElementTop(paragraphs[paragraphIndex], display)
         : display.scrollTop;
 
-    return {
+    const position = {
         paragraphIndex,
         paragraphOffset: display.scrollTop - paragraphTop,
         scrollRatio: maxScroll > 0 ? display.scrollTop / maxScroll : 0,
         updatedAt: Date.now()
     };
+    if (hasStoredChapters(currentArticle)) position.chapterId = getCurrentChapterId();
+    return position;
 }
 
 function rememberReadingPosition() {
     const position = captureReadingPosition();
-    if (position && currentArticle) currentArticle.readingPosition = position;
+    storeReadingPosition(position);
     return position;
 }
 
@@ -709,6 +952,7 @@ function restoreReadingPosition(position) {
     const restoreToken = ++readingPositionRestoreToken;
     const apply = () => {
         if (!display || restoreToken !== readingPositionRestoreToken || (currentArticle && currentArticle.id !== articleId)) return;
+        if (position?.chapterId !== undefined && String(position.chapterId) !== String(getCurrentChapterId())) return;
 
         suppressReadingPositionSave = true;
         const maxScroll = Math.max(0, display.scrollHeight - display.clientHeight);
@@ -771,7 +1015,7 @@ async function saveCurrentReadingPosition() {
     if (!currentArticle || !document.getElementById('text-display')) return;
     const position = captureReadingPosition();
     if (!position) return;
-    currentArticle.readingPosition = position;
+    storeReadingPosition(position);
     await saveToDB();
 }
 
@@ -799,12 +1043,36 @@ function countEnglishWords(text) {
     return matches ? matches.length : 0;
 }
 
-function updateProgress(event) {
+function getArticleFullText(article) {
+    if (!article) return '';
+    if (hasStoredChapters(article)) return getArticleChapters(article).map(chapter => chapter.content).join('\n\n');
+    return typeof article.content === 'string' ? article.content : '';
+}
+
+function getReaderWordCounts(article = currentArticle) {
+    const chapterText = article === currentArticle ? getCurrentChapterContent() : getArticleChapters(article)[0]?.content || '';
+    return {
+        chapter: countEnglishWords(chapterText),
+        book: countEnglishWords(getArticleFullText(article))
+    };
+}
+
+function updateProgress(event, forceWordCount = false) {
     const d = document.getElementById('text-display');
     if(!d || !currentArticle) return;
-    const content = typeof currentArticle.content === 'string' ? currentArticle.content : '';
+    const content = getCurrentChapterContent();
+    const chapterId = getCurrentChapterId();
+    if (forceWordCount || readerWordCounts.articleId !== currentArticle.id || readerWordCounts.chapterId !== chapterId) {
+        const counts = getReaderWordCounts(currentArticle);
+        readerWordCounts = { articleId: currentArticle.id, chapterId, ...counts };
+        const statusBar = document.getElementById('reading-status-bar');
+        if (statusBar) {
+            statusBar.dataset.chapterWordCount = String(readerWordCounts.chapter);
+            statusBar.dataset.bookWordCount = String(readerWordCounts.book);
+        }
+    }
     const wordCount = document.getElementById('word-count');
-    if (wordCount) wordCount.innerText = `${countEnglishWords(content).toLocaleString()} words`;
+    if (wordCount) wordCount.innerText = `${readerWordCounts.chapter.toLocaleString()} words`;
     document.getElementById('char-count').innerText = `${content.length.toLocaleString()}文字`;
     const progress = Math.round((d.scrollTop / Math.max(1, d.scrollHeight - d.clientHeight)) * 100) || 0;
     document.getElementById('read-progress').innerText = `${progress}%`;
