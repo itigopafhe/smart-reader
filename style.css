@@ -9,13 +9,15 @@
 
 * { box-sizing: border-box; } 
 
-body { 
-    margin: 0; 
-    font-family: -apple-system, sans-serif; 
-    background: var(--bg); 
-    color: var(--text); 
-    overflow: hidden; 
-    height: 100dvh; 
+body {
+    margin: 0;
+    font-family: -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
 }
 
 /* スマホズーム対策 */
@@ -39,16 +41,22 @@ input, textarea, select { font-size: 16px !important; }
 #article-meta { display: flex; align-items: center; gap: 10px; font-size: 0.8em; }
 
 /* メインエリア */
-#main-reader { 
-    height: 100%; 
-    flex: 1; 
-    overflow: hidden; 
-    display: flex; 
-    flex-direction: column; 
+#main-reader {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
-#text-display { 
-    flex: 1; overflow-y: auto; 
+#reader-wrapper {
+    flex: 1;
+    min-height: 0;
+}
+#text-display {
+    flex: 1; overflow-y: auto;
+    min-height: 0;
     width: 100%; 
     max-width: 800px; 
     margin: 0 auto; 
@@ -59,6 +67,66 @@ input, textarea, select { font-size: 16px !important; }
 }
 #text-display p { margin-bottom: 1.3em; }
 
+/* 本文検索バー */
+#reader-search-bar {
+    flex-shrink: 0;
+    padding: 7px 12px 6px;
+    background: white;
+    border-bottom: 1px solid #ddd;
+}
+.reader-search-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+#reader-search-input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #fafafa;
+}
+#search-count {
+    min-width: 48px;
+    text-align: center;
+    color: #666;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+#search-prev-btn, #search-next-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background: white;
+    color: var(--primary);
+    cursor: pointer;
+}
+#search-prev-btn:disabled, #search-next-btn:disabled {
+    color: #bbb;
+    background: #f5f5f5;
+    cursor: default;
+}
+.reader-search-options {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    max-width: 800px;
+    margin: 4px auto 0;
+    color: #666;
+    font-size: 0.78em;
+}
+.reader-search-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+}
+
 /* ★進捗ステータスバー */
 #reading-status-bar {
     height: 40px; background: white; border-top: 1px solid #ddd;
@@ -66,12 +134,18 @@ input, textarea, select { font-size: 16px !important; }
     padding: 0 15px; font-size: 0.85em; color: #666;
     flex-shrink: 0; padding-bottom: max(5px, env(safe-area-inset-bottom));
 }
+#reading-status-bar > div:first-child,
+#reading-status-bar > #bookmark-list {
+    align-self: flex-start;
+    width: calc(100% - 90px) !important;
+}
 #bookmark-btn { background: none; border: 1px solid #ddd; border-radius: 4px; padding: 4px 8px; cursor: pointer; }
 
 /* ハイライト */
 .note-highlight { border-bottom: 2px dashed #f39c12; background: rgba(243, 156, 18, 0.1); cursor: pointer; }
 .word-highlight { background-color: #b0e8f7; cursor: pointer; border-radius: 2px; } /* ★単語用マーカー */
 .search-match { background: #ffeb3b; color: black; border-bottom: 2px solid #f57f17; }
+.current-search-match { outline: 2px solid #e67e22; outline-offset: 1px; }
 .text-highlight { background: #669a2b; font-weight: bold; } /* 検索ヒット用 */
 
 /* サイドパネル (幅調整: 35%程度) */
@@ -80,7 +154,19 @@ input, textarea, select { font-size: 16px !important; }
     transition: transform 0.3s ease; display: flex; flex-direction: column; 
     box-shadow: 0 0 20px rgba(0,0,0,0.1); 
 }
-@media (max-width: 767px) { .panel { bottom: 0; left: 0; width: 100%; height: 80%; border-radius: 20px 20px 0 0; transform: translateY(100%); } }
+@media (max-width: 767px) {
+    .panel { bottom: 0; left: 0; width: 100%; height: 80%; border-radius: 20px 20px 0 0; transform: translateY(100%); }
+    #reading-status-bar { padding-right: 10px !important; }
+    #reading-status-bar > div:first-child {
+        width: auto !important;
+        flex-direction: column;
+        align-items: flex-start !important;
+        gap: 4px;
+        margin-bottom: 4px !important;
+    }
+    #reading-status-bar .status-info { white-space: nowrap; }
+    #bookmark-btn { white-space: nowrap; padding: 4px 7px !important; font-size: 12px; }
+}
 @media (min-width: 768px) { .panel { top: 0; right: 0; width: 380px; height: 100%; transform: translateX(100%); } }
 .panel.is-open { transform: translate(0, 0) !important; }
 

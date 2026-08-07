@@ -52,24 +52,34 @@
             </div>
         </div>
 
-        <div id="reader-wrapper" style="display:none; height:100%; display:flex; flex-direction:column;">
+        <div id="reader-wrapper" style="display:none; flex:1; min-height:0; flex-direction:column;">
             <div id="reader-search-bar">
-                <input type="text" id="reader-search-input" placeholder="本文内を検索..." oninput="searchInText()">
-                <span id="search-count">0件</span>
+                <div class="reader-search-main">
+                    <input type="text" id="reader-search-input" placeholder="本文内を検索..." oninput="searchInText()">
+                    <span id="search-count" aria-live="polite">0 / 0</span>
+                    <button type="button" id="search-prev-btn" onclick="previousSearchResult()" aria-label="前の検索結果">↑</button>
+                    <button type="button" id="search-next-btn" onclick="nextSearchResult()" aria-label="次の検索結果">↓</button>
+                </div>
+                <div class="reader-search-options">
+                    <label><input type="checkbox" id="search-whole-word" onchange="searchInText()"> 単語一致</label>
+                    <label><input type="checkbox" id="search-case-sensitive" onchange="searchInText()"> Aa</label>
+                </div>
             </div>
-            
-            <div id="text-display" onscroll="updateProgress()" onclick="handleReaderClick(event)"></div>
+
+            <div id="text-display" onclick="handleReaderClick(event)"></div>
 
         <div id="reading-status-bar" style="height: auto; flex-direction: column; padding: 10px;">
     <div style="display: flex; justify-content: space-between; width: 100%; align-items: center; margin-bottom: 8px;">
         <div class="status-info">
-            <span id="char-count">0文字</span> | 
+            <span id="word-count">0 words</span> |
+            <span id="char-count">0文字</span> |
             <span id="read-progress">0%</span>
         </div>
         <button id="bookmark-btn" onclick="addBookmark()" style="background: var(--primary); color: white; border: none; padding: 5px 12px; border-radius: 4px;">🔖 しおりを追加</button>
     </div>
     <div id="bookmark-list" style="display: flex; gap: 8px; overflow-x: auto; width: 100%; padding-bottom: 5px;"></div>
 </div>
+        </div>
 
     </main>
 
