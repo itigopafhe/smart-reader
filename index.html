@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>英読 - Smart Reader</title>
-    <link rel="stylesheet" href="style.css?v=1.1">
+    <link rel="stylesheet" href="style.css?v=1.2">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
@@ -16,6 +16,7 @@
         </div>
         <div id="article-meta" style="display:none;">
             <button onclick="editCurrentArticle()" class="small-edit-btn">編集</button>
+            <button onclick="showGlobalVocabulary()" class="small-edit-btn">Vocabulary</button>
             <a id="display-url" href="#" target="_blank">🔗 元記事</a>
         </div>
     </header>
@@ -25,12 +26,50 @@
             <div class="library-header">
                 <div id="breadcrumbs" class="breadcrumbs"></div>
                 <div class="library-actions">
+                    <button class="btn-sub" onclick="showGlobalVocabulary()">Vocabulary</button>
                     <input type="text" id="global-search-input" placeholder="全データから検索..." oninput="performGlobalSearch()">
                     <button class="btn-sub" onclick="createNewFolder()">＋ フォルダ</button>
                     <button class="start-btn" onclick="showInputArea()">＋ 記事作成</button>
                 </div>
             </div>
             <div id="library-list" class="library-grid"></div>
+        </div>
+
+        <div id="vocabulary-section" style="display:none;">
+            <div class="vocabulary-header">
+                <div class="vocabulary-title-row">
+                    <button class="btn-sub" onclick="showLibrary()">📚 Library</button>
+                    <div>
+                        <h2>Global Vocabulary</h2>
+                        <span id="global-vocab-count" class="vocabulary-count">0 words</span>
+                    </div>
+                </div>
+                <div class="vocabulary-controls">
+                    <input type="search" id="global-vocab-search" placeholder="単語・意味・メモ・出典を検索" oninput="updateGlobalVocabulary('query', this.value)">
+                    <label class="vocabulary-check"><input type="checkbox" id="global-vocab-exact" onchange="updateGlobalVocabulary('exact', this.checked)"> 完全一致</label>
+                    <select id="global-vocab-status" onchange="updateGlobalVocabulary('status', this.value)" aria-label="暗記状態">
+                        <option value="all">すべて</option>
+                        <option value="unmemorized">未暗記</option>
+                        <option value="memorized">暗記済み</option>
+                    </select>
+                    <select id="global-vocab-source" onchange="updateGlobalVocabulary('sourceId', this.value)" aria-label="出典"></select>
+                    <select id="global-vocab-chapter" onchange="updateGlobalVocabulary('chapterId', this.value)" aria-label="章" style="display:none;"></select>
+                    <select id="global-vocab-sort" onchange="updateGlobalVocabulary('sort', this.value)" aria-label="並び順">
+                        <option value="newest">新しい順</option>
+                        <option value="oldest">古い順</option>
+                        <option value="az">A → Z</option>
+                        <option value="za">Z → A</option>
+                    </select>
+                    <label class="vocabulary-check"><input type="checkbox" id="global-vocab-anki" onchange="toggleGlobalAnkiMode()"> 暗記モード</label>
+                    <select id="global-vocab-anki-target" onchange="updateGlobalAnkiTarget(this.value)" aria-label="暗記モード対象">
+                        <option value="both">単語と意味を隠す</option>
+                        <option value="word">単語を隠す</option>
+                        <option value="meaning">意味を隠す</option>
+                    </select>
+                    <button class="btn-export" onclick="exportGlobalVocabularyCSV()">全単語をCSV出力</button>
+                </div>
+            </div>
+            <div id="global-vocabulary-list" class="global-vocabulary-list"></div>
         </div>
 
         <div id="input-area" class="input-card" style="display:none;">
@@ -181,6 +220,6 @@
     </div>
 
     <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=3.0"></script>
 </body>
 </html>

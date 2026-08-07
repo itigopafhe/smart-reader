@@ -283,6 +283,17 @@ input, textarea, select { font-size: 16px !important; }
     z-index: 10;
     padding: 15px;
 }
+.library-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.library-actions input {
+    flex: 1 1 220px;
+    min-width: 150px;
+}
 
 
 /* --- ライブラリ・カードデザイン (画像1枚目の再現) --- */
@@ -410,5 +421,140 @@ input, textarea, select { font-size: 16px !important; }
     border-radius: 2px;
     padding: 0 2px;
 
+}
+
+/* --- Global Vocabulary --- */
+#vocabulary-section {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-bottom: 100px;
+}
+.vocabulary-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    padding: 15px;
+    background: var(--bg);
+    border-bottom: 1px solid #eee;
+}
+.vocabulary-title-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 1000px;
+    margin: 0 auto;
+}
+.vocabulary-title-row h2 {
+    margin: 0;
+    font-size: 1.35em;
+}
+.vocabulary-count {
+    color: #666;
+    font-size: 0.85em;
+}
+.vocabulary-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    max-width: 1000px;
+    margin: 12px auto 0;
+}
+.vocabulary-controls input[type="search"] {
+    flex: 1 1 240px;
+    min-width: 150px;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: white;
+}
+.vocabulary-controls select {
+    min-width: 110px;
+    max-width: 190px;
+    padding: 7px 8px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: white;
+}
+.vocabulary-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+    color: #666;
+    font-size: 0.85em;
+}
+.global-vocabulary-list {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 15px;
+}
+.global-vocabulary-card {
+    margin: 0;
+    cursor: pointer;
+    transition: box-shadow 0.15s, background-color 0.15s;
+}
+.global-vocabulary-card:hover {
+    box-shadow: 0 3px 12px rgba(0,0,0,0.1);
+}
+.global-vocabulary-card.memorized-item {
+    background: #fafafa;
+}
+.global-vocabulary-summary {
+    min-height: 38px;
+}
+.global-vocabulary-summary input[type="checkbox"] {
+    flex-shrink: 0;
+}
+.global-vocabulary-details {
+    margin-top: 10px;
+    padding: 10px 4px 0 26px;
+    border-top: 1px dashed #ddd;
+    font-size: 0.88em;
+}
+.global-vocabulary-detail-row {
+    display: flex;
+    gap: 8px;
+    margin: 5px 0;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.global-vocabulary-detail-label {
+    min-width: 56px;
+    color: #777;
+    font-weight: bold;
+    flex-shrink: 0;
+}
+.global-vocabulary-detail-value {
+    color: #333;
+}
+.global-vocabulary-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+    margin-top: 10px;
+}
+.global-vocabulary-empty {
+    padding: 30px 15px;
+    color: #777;
+    text-align: center;
+}
+@media (max-width: 767px) {
+    .vocabulary-header { padding: 10px; }
+    .vocabulary-title-row { align-items: flex-start; }
+    .vocabulary-title-row h2 { font-size: 1.15em; }
+    .vocabulary-controls { margin-top: 9px; gap: 6px; }
+    .vocabulary-controls input[type="search"] { flex-basis: 100%; }
+    .vocabulary-controls select { flex: 1 1 125px; max-width: none; }
+    .global-vocabulary-list { padding: 10px; }
+    .global-vocabulary-details { padding-left: 4px; }
+    .global-vocabulary-detail-row { display: block; }
+    .global-vocabulary-detail-label { display: block; }
 }
 
