@@ -57,6 +57,17 @@ const db = localforage.createInstance({ name: "ProjectA_DB_v3" });
 let libraryItems = [], currentFolderId = null, currentArticle = null;
 let currentChapterId = null;
 let readerWordCounts = { articleId: null, chapterId: null, chapter: 0, book: 0 };
+let pendingImportedDocument = null;
+let importReviewState = null;
+let importReviewActiveIndex = 0;
+let importReviewTempSequence = 0;
+let importReviewSearchState = {
+    query: '',
+    scope: 'current',
+    caseSensitive: false,
+    currentIndex: -1,
+    matches: []
+};
 let currentTab = 'words', isAnkiMode = false, selectedText = "", editingId = null;
 let readerSettings = { fontSize: 18, lineHeight: 1.8 };
 let movingItemId = null;
@@ -117,6 +128,8 @@ function setupEventListeners() {
         const navigation = document.getElementById('chapter-navigation');
         if (navigation && !navigation.contains(event.target)) closeChapterDropdown();
     });
+
+    setupImportReviewControls();
 }
 
 // --- 新規追加: 暗記モードの切り替え ---
@@ -135,6 +148,745 @@ document.addEventListener('selectionchange', () => {
 });
 
 // --- ファイル読み込み関連 ---
+function setFileImportStatus(message, isError = false) {
+    const status = document.getElementById('file-import-message');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('is-error', !!isError);
+}
+
+function getImportedDocumentText(documentData) {
+    if (!documentData) return '';
+    if (!Array.isArray(documentData.chapters) || documentData.chapters.length === 0) {
+        return typeof documentData.content === 'string' ? documentData.content : '';
+    }
+    return documentData.chapters
+        .map(chapter => typeof chapter.content === 'string' ? chapter.content : '')
+        .filter(Boolean)
+        .join('\n\n');
+}
+
+function createImportReviewState(documentData) {
+    const sourceName = documentData?.sourceName || 'document';
+    const rawChapters = Array.isArray(documentData?.chapters) ? documentData.chapters : [];
+    const chapters = rawChapters.length ? rawChapters : [{
+        title: '本文',
+        content: typeof documentData?.content === 'string' ? documentData.content : '',
+        order: 0
+    }];
+    return {
+        mode: 'import',
+        articleId: null,
+        title: String(documentData?.title || '').trim() || '無題',
+        sourceType: documentData?.sourceType || 'text',
+        sourceName,
+        warnings: Array.isArray(documentData?.warnings) ? documentData.warnings.slice() : [],
+        chapters: chapters.map((chapter, index) => ({
+            ...chapter,
+            id: chapter.id !== undefined && chapter.id !== null && String(chapter.id).trim()
+                ? String(chapter.id)
+                : 'review-temp-' + (++importReviewTempSequence),
+            title: String(chapter.title || '').trim() || '本文',
+            content: typeof chapter.content === 'string' ? chapter.content : '',
+            order: index
+        }))
+    };
+}
+
+function createSavedBookEditorState(article) {
+    const rawChapters = Array.isArray(article?.chapters) ? article.chapters : [];
+    const chapters = rawChapters
+        .filter(chapter => chapter && typeof chapter === 'object')
+        .sort((a, b) => {
+            const aOrder = Number.isFinite(Number(a.order)) ? Number(a.order) : 0;
+            const bOrder = Number.isFinite(Number(b.order)) ? Number(b.order) : 0;
+            return aOrder - bOrder;
+        })
+        .map((chapter, index) => ({
+            ...chapter,
+            id: chapter.id !== undefined && chapter.id !== null && String(chapter.id).trim()
+                ? chapter.id
+                : `chapter-${index + 1}`,
+            title: String(chapter.title || '').trim() || `Chapter ${index + 1}`,
+            content: typeof chapter.content === 'string' ? chapter.content : '',
+            order: index
+        }));
+
+    return {
+        mode: 'saved',
+        articleId: article?.id,
+        title: String(article?.name || '').trim() || '無題',
+        sourceType: article?.sourceType || '',
+        sourceName: article?.sourceName || '',
+        warnings: [],
+        readingPositionRedirects: {},
+        chapters
+    };
+}
+
+function isSavedBookEditor() {
+    return !!(importReviewState && importReviewState.mode === 'saved');
+}
+
+function resetImportReviewSearch() {
+    importReviewSearchState = {
+        query: '',
+        scope: 'current',
+        caseSensitive: false,
+        currentIndex: -1,
+        matches: []
+    };
+    const input = document.getElementById('import-review-search-input');
+    const scope = document.getElementById('import-review-search-scope');
+    const caseSensitive = document.getElementById('import-review-search-case-sensitive');
+    if (input) input.value = '';
+    if (scope) scope.value = 'current';
+    if (caseSensitive) caseSensitive.checked = false;
+    updateImportReviewSearch(false);
+}
+
+function openImportReview(documentData) {
+    importReviewState = createImportReviewState(documentData);
+    importReviewActiveIndex = 0;
+    pendingImportedDocument = documentData;
+    resetImportReviewSearch();
+    const titleInput = document.getElementById('text-title');
+    const bodyInput = document.getElementById('text-input');
+    if (titleInput) titleInput.value = importReviewState.title;
+    if (bodyInput) {
+        bodyInput.value = getImportedDocumentText(importReviewState);
+        bodyInput.readOnly = true;
+    }
+    hideAllSections();
+    const review = document.getElementById('import-review-area');
+    if (review) review.style.display = 'flex';
+    renderImportReview();
+    setImportReviewStatus(
+        importReviewState.chapters.length + '章を保存前に確認・修正できます。'
+        + (importReviewState.warnings.length ? ' ' + importReviewState.warnings.join(' ') : '')
+    );
+}
+
+function openSavedBookEditor(article) {
+    if (!article || !hasStoredChapters(article)) return;
+    flushReadingPositionSave();
+    editingId = null;
+    pendingImportedDocument = null;
+    importReviewState = createSavedBookEditorState(article);
+    const currentIndex = importReviewState.chapters.findIndex(chapter =>
+        String(chapter.id) === String(currentChapterId)
+    );
+    importReviewActiveIndex = currentIndex >= 0 ? currentIndex : 0;
+    resetImportReviewSearch();
+    hideAllSections();
+    const review = document.getElementById('import-review-area');
+    if (review) review.style.display = 'flex';
+    renderImportReview();
+    setImportReviewStatus('保存済み書籍を編集しています。既存chapter IDと登録データは保護されます。');
+}
+
+function setImportReviewStatus(message, isError = false) {
+    const status = document.getElementById('import-review-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('is-error', !!isError);
+}
+
+function finalizeImportReviewDocument() {
+    if (!importReviewState) return null;
+    const sourceType = importReviewState.sourceType || 'text';
+    const sourceName = importReviewState.sourceName || 'document';
+    const chapters = importReviewState.chapters.map((chapter, index) => {
+        const title = String(chapter.title || '').trim() || '本文';
+        const sourceKey = chapter.sourceKey || sourceName + '|review-' + index;
+        const id = SmartReaderImporters.generateStableChapterId({
+            sourceType,
+            sourceKey,
+            index,
+            title
+        });
+        return {
+            ...chapter,
+            id,
+            title,
+            content: typeof chapter.content === 'string' ? chapter.content : '',
+            order: index
+        };
+    });
+    return {
+        title: String(importReviewState.title || '').trim() || '無題',
+        sourceType,
+        sourceName,
+        content: chapters.map(chapter => chapter.content).filter(Boolean).join('\n\n'),
+        chapters,
+        warnings: importReviewState.warnings.slice()
+    };
+}
+
+function finalizeSavedBookEditorDocument() {
+    if (!importReviewState || !isSavedBookEditor()) return null;
+    syncImportReviewEditor();
+    const chapters = importReviewState.chapters.map((chapter, index) => ({
+        ...chapter,
+        id: chapter.id,
+        title: String(chapter.title || '').trim() || `Chapter ${index + 1}`,
+        content: typeof chapter.content === 'string' ? chapter.content : '',
+        order: index
+    }));
+    return {
+        title: String(importReviewState.title || '').trim() || '無題',
+        sourceType: importReviewState.sourceType,
+        sourceName: importReviewState.sourceName,
+        content: chapters.map(chapter => chapter.content).filter(Boolean).join('\n\n'),
+        chapters
+    };
+}
+
+async function saveImportReviewDocument() {
+    if (!importReviewState) return;
+    syncImportReviewEditor();
+    const finalized = finalizeImportReviewDocument();
+    if (!finalized) return;
+    pendingImportedDocument = finalized;
+    const titleInput = document.getElementById('text-title');
+    const bodyInput = document.getElementById('text-input');
+    if (titleInput) titleInput.value = finalized.title;
+    if (bodyInput) bodyInput.value = finalized.content;
+    importReviewState = null;
+    resetImportReviewSearch();
+    await saveNewArticle();
+}
+
+async function saveSavedBookEditor() {
+    if (!importReviewState || !isSavedBookEditor()) return;
+    const finalized = finalizeSavedBookEditorDocument();
+    if (!finalized) return;
+    const article = libraryItems.find(item => String(item.id) === String(importReviewState.articleId));
+    if (!article) {
+        setImportReviewStatus('保存対象の記事が見つかりません。', true);
+        return;
+    }
+
+    applySavedReadingPositionResets(article, importReviewState.readingPositionRedirects);
+    article.name = finalized.title;
+    article.content = finalized.content;
+    article.chapters = finalized.chapters;
+    if (finalized.sourceType) article.sourceType = finalized.sourceType;
+    if (finalized.sourceName) article.sourceName = finalized.sourceName;
+
+    await saveToDB();
+    importReviewState = null;
+    resetImportReviewSearch();
+    openArticle(article.id);
+}
+
+async function saveChapterEditor() {
+    if (isSavedBookEditor()) await saveSavedBookEditor();
+    else await saveImportReviewDocument();
+}
+
+async function saveReviewedImport() {
+    await saveChapterEditor();
+}
+
+function cancelChapterEditor() {
+    const savedArticleId = isSavedBookEditor() ? importReviewState.articleId : null;
+    importReviewState = null;
+    pendingImportedDocument = null;
+    resetImportReviewSearch();
+    if (savedArticleId !== null && savedArticleId !== undefined) openArticle(savedArticleId);
+    else showInputArea();
+}
+
+function cancelImportReview() {
+    cancelChapterEditor();
+}
+
+function setupImportReviewControls() {
+    const input = document.getElementById('import-review-search-input');
+    const scope = document.getElementById('import-review-search-scope');
+    const caseSensitive = document.getElementById('import-review-search-case-sensitive');
+    const previous = document.getElementById('import-review-search-prev');
+    const next = document.getElementById('import-review-search-next');
+
+    if (input) input.oninput = () => updateImportReviewSearch(true, true);
+    if (scope) scope.onchange = () => updateImportReviewSearch(true, true);
+    if (caseSensitive) caseSensitive.onchange = () => updateImportReviewSearch(true, true);
+    if (previous) previous.onclick = () => navigateImportReviewSearch(-1);
+    if (next) next.onclick = () => navigateImportReviewSearch(1);
+}
+
+function normalizeImportReviewOrders() {
+    if (!importReviewState || !Array.isArray(importReviewState.chapters)) return;
+    importReviewState.chapters.forEach((chapter, index) => { chapter.order = index; });
+}
+
+function getImportReviewChapter(index = importReviewActiveIndex) {
+    if (!importReviewState || !Array.isArray(importReviewState.chapters)) return null;
+    return importReviewState.chapters[index] || null;
+}
+
+function getSavedChapterReferenceCounts(article, chapterIds) {
+    const ids = new Set((chapterIds || []).map(id => String(id)));
+    const countItems = items => Array.isArray(items)
+        ? items.filter(item => item && item.chapterId !== undefined && item.chapterId !== null && ids.has(String(item.chapterId))).length
+        : 0;
+    let readingPositions = 0;
+    if (article?.readingPosition?.chapterId !== undefined && ids.has(String(article.readingPosition.chapterId))) {
+        readingPositions += 1;
+    }
+    if (article?.readingPositions && typeof article.readingPositions === 'object') {
+        readingPositions += Object.keys(article.readingPositions)
+            .filter(id => ids.has(String(id))).length;
+    }
+    return {
+        words: countItems(article?.words),
+        notes: countItems(article?.notes),
+        bookmarks: countItems(article?.bookmarks),
+        readingPositions
+    };
+}
+
+function ensureSavedChapterStructureEditAllowed(chapterIndexes, operation) {
+    if (!isSavedBookEditor()) return true;
+    const article = libraryItems.find(item => String(item.id) === String(importReviewState.articleId));
+    const chapters = (chapterIndexes || [])
+        .map(index => importReviewState.chapters[index])
+        .filter(Boolean);
+    if (!article || chapters.length === 0) return false;
+
+    const counts = getSavedChapterReferenceCounts(article, chapters.map(chapter => chapter.id));
+    const protectedDataCount = counts.words + counts.notes + counts.bookmarks;
+    if (protectedDataCount === 0) return true;
+
+    const message = [
+        'この章には登録済みデータがあります。',
+        '',
+        `単語: ${counts.words}`,
+        `ノート: ${counts.notes}`,
+        `しおり: ${counts.bookmarks}`,
+        `読書位置: ${counts.readingPositions}`,
+        '',
+        `データとの関連を保護するため、現在はこの章を${operation}できません。`,
+        '本文や章タイトルの編集は可能です。'
+    ].join('\n');
+    setImportReviewStatus(message, true);
+    alert(message);
+    return false;
+}
+
+function queueSavedReadingPositionReset(chapterIds, replacementChapterId = null) {
+    if (!isSavedBookEditor()) return false;
+    const article = libraryItems.find(item => String(item.id) === String(importReviewState.articleId));
+    if (!article) return false;
+    const ids = new Set((chapterIds || []).map(id => String(id)));
+    const redirects = importReviewState.readingPositionRedirects || {};
+    let changed = false;
+
+    if (article.readingPosition?.chapterId !== undefined && ids.has(String(article.readingPosition.chapterId))) {
+        changed = true;
+    }
+    if (article.readingPositions && typeof article.readingPositions === 'object') {
+        Object.keys(article.readingPositions).forEach(id => {
+            if (ids.has(String(id))) changed = true;
+        });
+    }
+    if (!changed) return false;
+
+    const replacement = replacementChapterId === null || replacementChapterId === undefined
+        ? null
+        : String(replacementChapterId);
+    ids.forEach(id => { redirects[id] = replacement; });
+    importReviewState.readingPositionRedirects = redirects;
+    return true;
+}
+
+function createResetReadingPosition(chapterId) {
+    return {
+        chapterId: String(chapterId),
+        paragraphIndex: 0,
+        paragraphOffset: 0,
+        scrollRatio: 0,
+        updatedAt: Date.now()
+    };
+}
+
+function applySavedReadingPositionResets(article, redirects = {}) {
+    if (!article || !redirects || typeof redirects !== 'object') return;
+    const latest = article.readingPosition;
+    if (latest?.chapterId !== undefined) {
+        const target = redirects[String(latest.chapterId)];
+        if (Object.prototype.hasOwnProperty.call(redirects, String(latest.chapterId))) {
+            if (target === null || target === undefined) delete article.readingPosition;
+            else article.readingPosition = createResetReadingPosition(target);
+        }
+    }
+
+    if (!article.readingPositions || typeof article.readingPositions !== 'object') return;
+    const replacements = new Set();
+    Object.keys(article.readingPositions).forEach(id => {
+        if (!Object.prototype.hasOwnProperty.call(redirects, String(id))) return;
+        const target = redirects[String(id)];
+        delete article.readingPositions[id];
+        if (target !== null && target !== undefined) replacements.add(String(target));
+    });
+    replacements.forEach(id => {
+        article.readingPositions[id] = createResetReadingPosition(id);
+    });
+}
+
+function createChapterEditorNewId() {
+    if (!isSavedBookEditor()) return 'review-temp-' + (++importReviewTempSequence);
+    const articleId = importReviewState.articleId ?? 'book';
+    const existing = new Set(importReviewState.chapters.map(chapter => String(chapter.id)));
+    let candidate = '';
+    do {
+        candidate = `chapter-${articleId}-new-${Date.now()}-${++importReviewTempSequence}`;
+    } while (existing.has(candidate));
+    return candidate;
+}
+
+function syncImportReviewEditor() {
+    const chapter = getImportReviewChapter();
+    if (!chapter) return;
+    const titleInput = document.getElementById('import-review-chapter-title');
+    const contentInput = document.getElementById('import-review-chapter-content');
+    if (titleInput) chapter.title = titleInput.value;
+    if (contentInput) chapter.content = contentInput.value;
+    normalizeImportReviewOrders();
+}
+
+function renderImportReviewChapterList() {
+    const list = document.getElementById('import-review-chapter-list');
+    if (!list || !importReviewState) return;
+    list.textContent = '';
+
+    importReviewState.chapters.forEach((chapter, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'import-review-chapter-option' +
+            (index === importReviewActiveIndex ? ' is-current' : '');
+        button.setAttribute('aria-current', index === importReviewActiveIndex ? 'true' : 'false');
+        button.title = chapter.title || '本文';
+        button.textContent = `${index + 1}. ${chapter.title || '本文'}`;
+        button.onclick = () => selectImportReviewChapter(index);
+        list.appendChild(button);
+    });
+}
+
+function renderImportReviewEditor() {
+    const chapter = getImportReviewChapter();
+    if (!chapter) return;
+    const label = document.getElementById('import-review-current-label');
+    const titleInput = document.getElementById('import-review-chapter-title');
+    const contentInput = document.getElementById('import-review-chapter-content');
+    if (label) label.textContent = `Chapter ${importReviewActiveIndex + 1} / ${importReviewState.chapters.length}`;
+    if (titleInput) {
+        titleInput.value = chapter.title || '';
+        titleInput.oninput = () => {
+            chapter.title = titleInput.value;
+            renderImportReviewChapterList();
+        };
+    }
+    if (contentInput) {
+        contentInput.value = chapter.content || '';
+        contentInput.oninput = () => {
+            chapter.content = contentInput.value;
+            if (importReviewSearchState.query) updateImportReviewSearch(false, false);
+        };
+    }
+}
+
+function renderImportReview() {
+    if (!importReviewState) return;
+    normalizeImportReviewOrders();
+    const heading = document.getElementById('chapter-editor-heading');
+    const saveButton = document.getElementById('chapter-editor-save');
+    const titleInput = document.getElementById('import-review-title');
+    const source = document.getElementById('import-review-source');
+    if (heading) heading.textContent = isSavedBookEditor() ? 'Book Editor' : 'Import Review';
+    if (saveButton) saveButton.textContent = isSavedBookEditor() ? '変更を保存' : '保存して読む';
+    if (titleInput) {
+        titleInput.value = importReviewState.title || '';
+        titleInput.oninput = () => { importReviewState.title = titleInput.value; };
+    }
+    if (source) source.textContent = isSavedBookEditor()
+        ? '保存済み書籍'
+        : `${importReviewState.sourceType || 'text'} · ${importReviewState.sourceName || 'document'}`;
+    renderImportReviewChapterList();
+    renderImportReviewEditor();
+    updateImportReviewSearch(false, false);
+}
+
+function selectImportReviewChapter(index) {
+    if (!importReviewState || index < 0 || index >= importReviewState.chapters.length) return;
+    syncImportReviewEditor();
+    importReviewActiveIndex = index;
+    renderImportReviewChapterList();
+    renderImportReviewEditor();
+    const isCurrentScope = importReviewSearchState.scope === 'current';
+    updateImportReviewSearch(isCurrentScope, false);
+}
+
+function getImportReviewSearchMatches() {
+    if (!importReviewState || !importReviewSearchState.query) return [];
+    const query = importReviewSearchState.caseSensitive
+        ? importReviewSearchState.query
+        : importReviewSearchState.query.toLocaleLowerCase();
+    const chapters = importReviewSearchState.scope === 'all'
+        ? importReviewState.chapters
+        : [getImportReviewChapter()].filter(Boolean);
+    const matches = [];
+
+    chapters.forEach(chapter => {
+        const chapterIndex = importReviewState.chapters.indexOf(chapter);
+        const content = typeof chapter.content === 'string' ? chapter.content : '';
+        const haystack = importReviewSearchState.caseSensitive ? content : content.toLocaleLowerCase();
+        if (!query || !haystack) return;
+        let from = 0;
+        while (from <= haystack.length) {
+            const start = haystack.indexOf(query, from);
+            if (start < 0) break;
+            matches.push({ chapterIndex, start, end: start + query.length });
+            from = start + Math.max(query.length, 1);
+        }
+    });
+    return matches;
+}
+
+function updateImportReviewSearch(resetIndex = true, shouldFocus = false) {
+    const count = document.getElementById('import-review-search-count');
+    const previous = document.getElementById('import-review-search-prev');
+    const next = document.getElementById('import-review-search-next');
+    if (!importReviewState) {
+        importReviewSearchState.matches = [];
+        importReviewSearchState.currentIndex = -1;
+        if (count) count.textContent = '0 / 0';
+        if (previous) previous.disabled = true;
+        if (next) next.disabled = true;
+        return;
+    }
+
+    const input = document.getElementById('import-review-search-input');
+    const scope = document.getElementById('import-review-search-scope');
+    const caseSensitive = document.getElementById('import-review-search-case-sensitive');
+    if (input) importReviewSearchState.query = input.value.trim();
+    if (scope) importReviewSearchState.scope = scope.value === 'all' ? 'all' : 'current';
+    if (caseSensitive) importReviewSearchState.caseSensitive = !!caseSensitive.checked;
+
+    const oldIndex = importReviewSearchState.currentIndex;
+    importReviewSearchState.matches = getImportReviewSearchMatches();
+    if (importReviewSearchState.matches.length === 0) {
+        importReviewSearchState.currentIndex = -1;
+    } else if (resetIndex || oldIndex < 0) {
+        importReviewSearchState.currentIndex = 0;
+    } else {
+        importReviewSearchState.currentIndex = Math.min(oldIndex, importReviewSearchState.matches.length - 1);
+    }
+
+    const displayIndex = importReviewSearchState.currentIndex >= 0
+        ? importReviewSearchState.currentIndex + 1
+        : 0;
+    if (count) count.textContent = `${displayIndex} / ${importReviewSearchState.matches.length}`;
+    if (previous) previous.disabled = importReviewSearchState.matches.length === 0;
+    if (next) next.disabled = importReviewSearchState.matches.length === 0;
+    if (shouldFocus && importReviewSearchState.currentIndex >= 0) focusImportReviewSearchMatch();
+}
+
+function focusImportReviewSearchMatch() {
+    const match = importReviewSearchState.matches[importReviewSearchState.currentIndex];
+    if (!match || !importReviewState) return;
+
+    if (match.chapterIndex !== importReviewActiveIndex) {
+        syncImportReviewEditor();
+        importReviewActiveIndex = match.chapterIndex;
+        renderImportReviewChapterList();
+        renderImportReviewEditor();
+    }
+
+    const textarea = document.getElementById('import-review-chapter-content');
+    if (!textarea) return;
+    const apply = () => {
+        textarea.focus();
+        textarea.setSelectionRange(match.start, match.end);
+        const maxScroll = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
+        const ratio = textarea.value.length > 0 ? match.start / textarea.value.length : 0;
+        textarea.scrollTop = maxScroll * ratio;
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
+    else setTimeout(apply, 0);
+}
+
+function navigateImportReviewSearch(direction) {
+    if (!importReviewSearchState.matches.length) return;
+    const length = importReviewSearchState.matches.length;
+    const current = importReviewSearchState.currentIndex < 0 ? 0 : importReviewSearchState.currentIndex;
+    importReviewSearchState.currentIndex = (current + direction + length) % length;
+    const count = document.getElementById('import-review-search-count');
+    if (count) count.textContent = `${importReviewSearchState.currentIndex + 1} / ${length}`;
+    focusImportReviewSearchMatch();
+}
+
+function addImportReviewChapter() {
+    if (!importReviewState) return;
+    syncImportReviewEditor();
+    const index = importReviewActiveIndex + 1;
+    importReviewState.chapters.splice(index, 0, {
+        id: createChapterEditorNewId(),
+        title: '新しい章',
+        content: '',
+        order: index,
+        ...(isSavedBookEditor() ? {} : { sourceKey: 'review-add-' + importReviewTempSequence })
+    });
+    importReviewActiveIndex = index;
+    normalizeImportReviewOrders();
+    renderImportReview();
+    setImportReviewStatus('新しいchapterを追加しました。');
+    const titleInput = document.getElementById('import-review-chapter-title');
+    if (titleInput) { titleInput.focus(); titleInput.select(); }
+}
+
+function deleteImportReviewChapter() {
+    if (!importReviewState) return;
+    if (importReviewState.chapters.length <= 1) {
+        alert('最後のchapterは削除できません。');
+        return;
+    }
+    if (!ensureSavedChapterStructureEditAllowed([importReviewActiveIndex], '削除')) return;
+    if (typeof window.confirm === 'function' && !window.confirm('このchapterを削除しますか？')) return;
+    syncImportReviewEditor();
+    const deletedChapterId = importReviewState.chapters[importReviewActiveIndex].id;
+    const replacementChapterId = importReviewState.chapters[importReviewActiveIndex - 1]?.id
+        ?? importReviewState.chapters[importReviewActiveIndex + 1]?.id
+        ?? null;
+    const readingPositionReset = queueSavedReadingPositionReset([deletedChapterId], replacementChapterId);
+    importReviewState.chapters.splice(importReviewActiveIndex, 1);
+    importReviewActiveIndex = Math.min(importReviewActiveIndex, importReviewState.chapters.length - 1);
+    normalizeImportReviewOrders();
+    renderImportReview();
+    setImportReviewStatus(readingPositionReset
+        ? 'chapterを削除しました。対象chapterの読書位置を安全な位置へリセットします。'
+        : 'chapterを削除しました。');
+}
+
+function moveImportReviewChapter(direction) {
+    if (!importReviewState) return;
+    const target = importReviewActiveIndex + direction;
+    if (target < 0 || target >= importReviewState.chapters.length) return;
+    syncImportReviewEditor();
+    const chapters = importReviewState.chapters;
+    [chapters[importReviewActiveIndex], chapters[target]] = [chapters[target], chapters[importReviewActiveIndex]];
+    importReviewActiveIndex = target;
+    normalizeImportReviewOrders();
+    renderImportReview();
+}
+
+function combineImportReviewContent(left, right) {
+    const first = String(left || '').replace(/\s+$/u, '');
+    const second = String(right || '').replace(/^\s+/u, '');
+    if (!first) return second;
+    if (!second) return first;
+    return `${first}\n\n${second}`;
+}
+
+function mergeImportReviewChapter(direction) {
+    if (!importReviewState) return;
+    const target = importReviewActiveIndex + direction;
+    if (target < 0 || target >= importReviewState.chapters.length) return;
+    if (!ensureSavedChapterStructureEditAllowed([importReviewActiveIndex, target], '結合')) return;
+    syncImportReviewEditor();
+    const chapters = importReviewState.chapters;
+    const retainedChapterId = direction < 0 ? chapters[target].id : chapters[importReviewActiveIndex].id;
+    const removedChapterId = direction < 0 ? chapters[importReviewActiveIndex].id : chapters[target].id;
+    const readingPositionReset = queueSavedReadingPositionReset(
+        [retainedChapterId, removedChapterId],
+        retainedChapterId
+    );
+    if (direction < 0) {
+        chapters[target].content = combineImportReviewContent(chapters[target].content, chapters[importReviewActiveIndex].content);
+        importReviewState.chapters.splice(importReviewActiveIndex, 1);
+        importReviewActiveIndex = target;
+    } else {
+        chapters[importReviewActiveIndex].content = combineImportReviewContent(chapters[importReviewActiveIndex].content, chapters[target].content);
+        importReviewState.chapters.splice(target, 1);
+    }
+    normalizeImportReviewOrders();
+    renderImportReview();
+    setImportReviewStatus(readingPositionReset
+        ? 'chapterを結合しました。対象chapterの読書位置をリセットします。'
+        : 'chapterを結合しました。');
+}
+
+function splitImportReviewChapter() {
+    const chapter = getImportReviewChapter();
+    const textarea = document.getElementById('import-review-chapter-content');
+    if (!chapter || !textarea) return;
+    if (!ensureSavedChapterStructureEditAllowed([importReviewActiveIndex], '分割')) return;
+    const originalChapterId = chapter.id;
+    syncImportReviewEditor();
+    const position = Number.isInteger(textarea.selectionStart) ? textarea.selectionStart : 0;
+    if (position <= 0 || position >= chapter.content.length) {
+        alert('本文の途中にカーソルを置いてください。');
+        return;
+    }
+    const left = chapter.content.slice(0, position).replace(/\s+$/u, '');
+    const right = chapter.content.slice(position).replace(/^\s+/u, '');
+    if (!left || !right) {
+        alert('空のchapterにならない位置を指定してください。');
+        return;
+    }
+    const newIndex = importReviewActiveIndex + 1;
+    const newChapter = {
+        id: createChapterEditorNewId(),
+        title: `Chapter ${newIndex + 1}`,
+        content: right,
+        order: newIndex,
+        ...(isSavedBookEditor()
+            ? {}
+            : { sourceKey: (chapter.sourceKey || chapter.id || 'chapter') + '|split-' + importReviewTempSequence })
+    };
+    chapter.content = left;
+    importReviewState.chapters.splice(newIndex, 0, newChapter);
+    importReviewActiveIndex = newIndex;
+    const readingPositionReset = queueSavedReadingPositionReset([originalChapterId], originalChapterId);
+    normalizeImportReviewOrders();
+    renderImportReview();
+    setImportReviewStatus(readingPositionReset
+        ? 'chapterを分割しました。対象chapterの読書位置は先頭へリセットします。'
+        : 'chapterを分割しました。タイトルを確認してください。');
+    const titleInput = document.getElementById('import-review-chapter-title');
+    if (titleInput) { titleInput.focus(); titleInput.select(); }
+}
+
+function joinImportReviewWrappedLines() {
+    const chapter = getImportReviewChapter();
+    if (!chapter) return;
+    syncImportReviewEditor();
+    const paragraphs = String(chapter.content || '')
+        .replace(/\r\n?/gu, '\n')
+        .split(/\n\s*\n/gu)
+        .map(paragraph => paragraph.split('\n').map(line => line.trim()).filter(Boolean).join(' '))
+        .filter(Boolean);
+    chapter.content = paragraphs.join('\n\n');
+    renderImportReview();
+    setImportReviewStatus('現在chapterの折り返し改行を結合しました。');
+}
+
+function normalizeImportReviewParagraphSpacing() {
+    const chapter = getImportReviewChapter();
+    if (!chapter) return;
+    syncImportReviewEditor();
+    chapter.content = String(chapter.content || '')
+        .replace(/\r\n?/gu, '\n')
+        .split('\n')
+        .map(line => line.replace(/[ \t]+/gu, ' ').replace(/\s+$/u, ''))
+        .join('\n')
+        .replace(/\n{3,}/gu, '\n\n')
+        .trim();
+    renderImportReview();
+    setImportReviewStatus('現在chapterの段落間隔を整理しました。');
+}
+
 async function handleFileUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -142,17 +894,25 @@ async function handleFileUpload(event) {
     const bodyInput = document.getElementById('text-input');
     const label = document.getElementById('file-label-text');
 
-    label.innerText = "⏳ 読み込み中...";
-    if (!titleInput.value) titleInput.value = file.name.replace(/\.[^/.]+$/, "");
+    if (label) label.innerText = "⏳ 読み込み中...";
+    setFileImportStatus('');
 
     try {
-        let text = file.type === "application/pdf" ? await readPDF(file) : await readText(file);
-        bodyInput.value = text;
-        label.innerText = "✅ 読み込み完了！";
+        const documentData = await SmartReaderImporters.parseImportedFile(file);
+        pendingImportedDocument = documentData;
+        if (!titleInput.value) titleInput.value = documentData.title || file.name.replace(/\.[^/.]+$/, "");
+        bodyInput.value = getImportedDocumentText(documentData);
+        bodyInput.readOnly = true;
+        if (label) label.innerText = "✅ 読み込み完了！";
+        openImportReview(documentData);
     } catch (e) {
         console.error(e);
-        alert("読み込み失敗");
-        label.innerText = "📄 PDF / TXT ファイルを読み込む";
+        pendingImportedDocument = null;
+        const message = e?.message || 'ファイルの読み込みに失敗しました。';
+        alert(message);
+        bodyInput.readOnly = false;
+        if (label) label.innerText = "📄 EPUB / PDF / HTML / TXT ファイルを読み込む";
+        setFileImportStatus(message, true);
     }
 }
 
@@ -166,37 +926,8 @@ function readText(file) {
 }
 
 async function readPDF(file) {
-    const ab = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: ab }).promise;
-    let full = "";
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const p = await pdf.getPage(i);
-        const tc = await p.getTextContent();
-        
-        let lastY = -1;
-        let pageText = "";
-
-        tc.items.forEach(item => {
-            // item.transform[5] はテキストの垂直位置（Y座標）
-            const currentY = item.transform[5];
-
-            // 前のテキストと高さが変わったら改行とみなす
-            // 閾値（5など）を設けることで微細なズレでの改行を防ぐ
-            if (lastY !== -1 && Math.abs(lastY - currentY) > 5) {
-                pageText += "\n";
-            } else if (lastY !== -1) {
-                // 同じ行内であれば、単語間のスペースを補完（PDFの構造による）
-                pageText += " "; 
-            }
-
-            pageText += item.str;
-            lastY = currentY;
-        });
-
-        full += pageText + "\n\n"; // ページ区切りに空行を入れる
-    }
-    return full;
+    const documentData = await SmartReaderImporters.parsePdfImport(file);
+    return getImportedDocumentText(documentData);
 }
 
 
@@ -205,6 +936,9 @@ function showLibrary() {
     flushReadingPositionSave();
     hideAllSections();
     editingId = null; // 本棚に戻る際は編集IDをリセット
+    pendingImportedDocument = null;
+    importReviewState = null;
+    resetImportReviewSearch();
     document.getElementById('library-section').style.display = 'block';
     const list = document.getElementById('library-list');
     const bc = document.getElementById('breadcrumbs');
@@ -244,16 +978,25 @@ function showInputArea() {
     flushReadingPositionSave();
     hideAllSections();
     editingId = null;
+    pendingImportedDocument = null;
+    importReviewState = null;
+    resetImportReviewSearch();
     document.getElementById('input-title-label').innerText = "記事を登録";
     document.getElementById('text-title').value = ""; 
     document.getElementById('text-url').value = ""; 
     document.getElementById('text-input').value = "";
+    document.getElementById('text-input').readOnly = false;
     document.getElementById('input-area').style.display = 'block';
     document.getElementById('file-input').value = ""; 
+    setFileImportStatus('');
 }
 
 function editCurrentArticle() { 
     if(!currentArticle) return; 
+    if (hasStoredChapters(currentArticle)) {
+        openSavedBookEditor(currentArticle);
+        return;
+    }
     flushReadingPositionSave();
     editingId = currentArticle.id; 
     hideAllSections(); 
@@ -263,6 +1006,7 @@ function editCurrentArticle() {
     document.getElementById('text-input').value = typeof currentArticle.content === 'string' && currentArticle.content
         ? currentArticle.content
         : getArticleFullText(currentArticle);
+    document.getElementById('text-input').readOnly = false;
     document.getElementById('input-area').style.display = 'block'; 
 }
 
@@ -270,21 +1014,45 @@ async function saveNewArticle() {
     const name = document.getElementById('text-title').value || "無題";
     const content = document.getElementById('text-input').value;
     const url = document.getElementById('text-url').value;
-    if (!content) return alert("本文を入力してください");
+    const imported = pendingImportedDocument;
+    const importedContent = getImportedDocumentText(imported);
+    if (!imported && !content) return alert("本文を入力してください");
 
     if (editingId) {
         const art = libraryItems.find(i => i.id === editingId);
         if (art) {
-            art.name = name; art.content = content; art.url = url;
+            if (hasStoredChapters(art)) {
+                alert("章構造の記事は本文を平坦化して編集できません。");
+                return;
+            }
+            art.name = name;
+            art.content = imported ? importedContent : content;
+            art.url = url;
+            if (imported) {
+                art.chapters = imported.chapters;
+                art.sourceType = imported.sourceType;
+                art.sourceName = imported.sourceName;
+            }
         }
     } else {
         const newArt = { 
-            id: Date.now(), type: 'article', name, parentId: currentFolderId, content, url, 
+            id: Date.now(),
+            type: 'article',
+            name: imported?.title && name === "無題" ? imported.title : name,
+            parentId: currentFolderId,
+            content: imported ? importedContent : content,
+            url,
             words: [], notes: [], bookmarks: [] 
         };
+        if (imported) {
+            newArt.chapters = imported.chapters;
+            newArt.sourceType = imported.sourceType;
+            newArt.sourceName = imported.sourceName;
+        }
         libraryItems.push(newArt);
         editingId = newArt.id;
     }
+    pendingImportedDocument = null;
     await saveToDB(); 
     openArticle(editingId);
 }
@@ -308,7 +1076,8 @@ function performGlobalSearch() {
     const results = libraryItems.filter(item => {
         if (item.type === 'folder') return item.name.toLowerCase().includes(q);
         const hitTitle = item.name.toLowerCase().includes(q);
-        const hitContent = item.content && item.content.toLowerCase().includes(q);
+        const searchableContent = getArticleSearchableText(item);
+        const hitContent = searchableContent.toLowerCase().includes(q);
         const hitWords = item.words?.some(w => (w.word + w.meaning + (w.memo||"")).toLowerCase().includes(q));
         const hitNotes = item.notes?.some(n => (n.originalText + n.translation + (n.extra||"")).toLowerCase().includes(q));
         return hitTitle || hitContent || hitWords || hitNotes;
@@ -330,6 +1099,7 @@ function performGlobalSearch() {
         };
 
         if(item.type === 'article') {
+            const searchableContent = getArticleSearchableText(item);
             // 1. タイトルヒット
             if(item.name.toLowerCase().includes(q)) {
                 snippetHtml += `
@@ -339,11 +1109,11 @@ function performGlobalSearch() {
                     </div>`;
             }
             // 2. 本文ヒット
-            if(item.content && item.content.toLowerCase().includes(q)) {
-                const idx = item.content.toLowerCase().indexOf(q);
+            if(searchableContent && searchableContent.toLowerCase().includes(q)) {
+                const idx = searchableContent.toLowerCase().indexOf(q);
                 const start = Math.max(0, idx - 15);
                 // ★修正: 切り出したテキストを highlight 関数に通す（中でエスケープされる）
-                const rawText = item.content.substring(start, idx + q.length + 20);
+                const rawText = searchableContent.substring(start, idx + q.length + 20);
                 
                 // ★修正: クリック時に openArticleAndSearch を呼び出すように変更
                 // inputQ (元の検索語) を渡す
@@ -1035,7 +1805,7 @@ function flushReadingPositionSave() {
 }
 
 async function saveToDB() { await db.setItem('library_items', libraryItems); }
-function hideAllSections() { ['library-section', 'input-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
+function hideAllSections() { ['library-section', 'input-area', 'import-review-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
 function closeModal() { document.getElementById('unified-modal-overlay').classList.remove('show'); editingId = null; }
 function togglePanel() { document.getElementById('side-panel').classList.toggle('is-open'); }
 function countEnglishWords(text) {
@@ -1047,6 +1817,10 @@ function getArticleFullText(article) {
     if (!article) return '';
     if (hasStoredChapters(article)) return getArticleChapters(article).map(chapter => chapter.content).join('\n\n');
     return typeof article.content === 'string' ? article.content : '';
+}
+
+function getArticleSearchableText(article) {
+    return getArticleFullText(article);
 }
 
 function getReaderWordCounts(article = currentArticle) {

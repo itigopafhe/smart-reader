@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>英読 - Smart Reader</title>
-    <link rel="stylesheet" href="style.css?v=1.1">
+    <link rel="stylesheet" href="style.css?v=1.3">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
@@ -37,10 +37,11 @@
             <h2 id="input-title-label">記事を登録</h2>
             <div class="file-upload-zone">
                 <label for="file-input" class="file-label">
-                    <span id="file-label-text">📄 PDF / TXT ファイルを読み込む</span>
-                    <input type="file" id="file-input" accept=".pdf,.txt" onchange="handleFileUpload(event)">
+                    <span id="file-label-text">📄 EPUB / PDF / HTML / TXT ファイルを読み込む</span>
+                    <input type="file" id="file-input" accept=".epub,.pdf,.html,.htm,.txt" onchange="handleFileUpload(event)">
                 </label>
             </div>
+            <div id="file-import-message" class="file-import-message" role="status" aria-live="polite"></div>
             <div class="full-width-form">
                 <input type="text" id="text-title" placeholder="タイトルの名前">
                 <input type="url" id="text-url" placeholder="出典URL（https://...）">
@@ -49,6 +50,67 @@
             <div class="input-actions">
                 <button onclick="showLibrary()" class="btn-cancel">キャンセル</button>
                 <button onclick="saveNewArticle()" class="start-btn">保存して読む</button>
+            </div>
+        </div>
+
+        <div id="import-review-area" class="import-review-card" style="display:none;">
+            <div class="import-review-header">
+                <div>
+                    <h2 id="chapter-editor-heading">Import Review</h2>
+                    <div id="import-review-status" class="file-import-message" role="status" aria-live="polite"></div>
+                </div>
+                <span id="import-review-source" class="import-review-source"></span>
+            </div>
+
+            <div class="import-review-title-row">
+                <label for="import-review-title">Title:</label>
+                <input type="text" id="import-review-title" placeholder="タイトル">
+            </div>
+
+            <div class="import-review-search-bar">
+                <span aria-hidden="true">🔍</span>
+                <input type="text" id="import-review-search-input" placeholder="章・本文を検索...">
+                <select id="import-review-search-scope" aria-label="検索範囲">
+                    <option value="current">現在のchapter</option>
+                    <option value="all">インポート文書全体</option>
+                </select>
+                <span id="import-review-search-count" aria-live="polite">0 / 0</span>
+                <button type="button" id="import-review-search-prev" aria-label="前の検索結果">↑</button>
+                <button type="button" id="import-review-search-next" aria-label="次の検索結果">↓</button>
+                <label class="import-review-aa"><input type="checkbox" id="import-review-search-case-sensitive"> Aa</label>
+            </div>
+
+            <div class="import-review-layout">
+                <aside class="import-review-chapters">
+                    <h3>Chapters</h3>
+                    <div id="import-review-chapter-list" class="import-review-chapter-list"></div>
+                    <div class="import-review-chapter-actions">
+                        <button type="button" onclick="addImportReviewChapter()">＋追加</button>
+                        <button type="button" onclick="moveImportReviewChapter(-1)">↑上へ</button>
+                        <button type="button" onclick="moveImportReviewChapter(1)">↓下へ</button>
+                    </div>
+                </aside>
+
+                <section class="import-review-editor">
+                    <div class="import-review-editor-heading">
+                        <span id="import-review-current-label">Chapter 1</span>
+                        <button type="button" class="btn-danger" onclick="deleteImportReviewChapter()">削除</button>
+                    </div>
+                    <input type="text" id="import-review-chapter-title" placeholder="Chapter title">
+                    <textarea id="import-review-chapter-content" placeholder="chapter本文"></textarea>
+                    <div class="import-review-editor-actions">
+                        <button type="button" onclick="splitImportReviewChapter()">ここで章を分割</button>
+                        <button type="button" onclick="mergeImportReviewChapter(-1)">前の章と結合</button>
+                        <button type="button" onclick="mergeImportReviewChapter(1)">次の章と結合</button>
+                        <button type="button" onclick="joinImportReviewWrappedLines()">折り返し改行を結合</button>
+                        <button type="button" onclick="normalizeImportReviewParagraphSpacing()">段落間隔を整理</button>
+                    </div>
+                </section>
+            </div>
+
+            <div class="input-actions import-review-actions">
+                <button type="button" id="chapter-editor-cancel" onclick="cancelChapterEditor()" class="btn-cancel">キャンセル</button>
+                <button type="button" id="chapter-editor-save" onclick="saveChapterEditor()" class="start-btn">保存して読む</button>
             </div>
         </div>
 
@@ -192,6 +254,7 @@
     </div>
 
     <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
-    <script src="app.js?v=2.6"></script>
+    <script src="importers.js?v=1.1"></script>
+    <script src="app.js?v=2.9"></script>
 </body>
 </html>
