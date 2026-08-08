@@ -53,14 +53,16 @@ const SAMPLE_DATA = [
 
 
 const db = localforage.createInstance({ name: "ProjectA_DB_v3" });
+const DEFAULT_READER_SETTINGS = Object.freeze({ fontSize: 18, lineHeight: 1.8 });
 
 let libraryItems = [], currentFolderId = null, currentArticle = null;
 let currentChapterId = null;
-let readerWordCounts = { articleId: null, chapterId: null, chapter: 0, book: 0 };
+let readerWordCounts = { articleId: null, chapterId: null, chapter: 0, book: 0, chapterChars: 0, bookChars: 0 };
 let pendingImportedDocument = null;
 let importReviewState = null;
 let importReviewActiveIndex = 0;
 let importReviewTempSequence = 0;
+let importReviewFeedbackTimer = null;
 let importReviewSearchState = {
     query: '',
     scope: 'current',
@@ -70,17 +72,19 @@ let importReviewSearchState = {
 };
 let currentTab = 'words', isAnkiMode = false, selectedText = "", editingId = null;
 let selectedReaderCapture = null;
-let readerSettings = { fontSize: 18, lineHeight: 1.8 };
+let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
 let readingPositionSaveTimer = null;
 let suppressReadingPositionSave = false;
 let readingPositionRestoreToken = 0;
+let pendingSmartReaderRestore = null;
 let readerSearchState = {
     query: '',
     wholeWord: false,
     caseSensitive: false,
     scope: 'chapter',
+    articleId: null,
     currentIndex: -1,
     matches: [],
     results: []
@@ -285,6 +289,8 @@ function openImportReview(documentData) {
         bodyInput.readOnly = true;
     }
     hideAllSections();
+    document.getElementById('add-btn').style.display = 'none';
+    document.getElementById('fab-toggle').style.display = 'none';
     const review = document.getElementById('import-review-area');
     if (review) review.style.display = 'flex';
     renderImportReview();
@@ -306,6 +312,8 @@ function openSavedBookEditor(article) {
     importReviewActiveIndex = currentIndex >= 0 ? currentIndex : 0;
     resetImportReviewSearch();
     hideAllSections();
+    document.getElementById('add-btn').style.display = 'none';
+    document.getElementById('fab-toggle').style.display = 'none';
     const review = document.getElementById('import-review-area');
     if (review) review.style.display = 'flex';
     renderImportReview();
@@ -436,9 +444,12 @@ function setupImportReviewControls() {
     const previous = document.getElementById('import-review-search-prev');
     const next = document.getElementById('import-review-search-next');
 
-    if (input) input.oninput = () => updateImportReviewSearch(true, true);
-    if (scope) scope.onchange = () => updateImportReviewSearch(true, true);
-    if (caseSensitive) caseSensitive.onchange = () => updateImportReviewSearch(true, true);
+    if (input) {
+        input.oninput = () => updateImportReviewSearch(true, false);
+        input.onkeydown = handleImportReviewSearchKeydown;
+    }
+    if (scope) scope.onchange = () => updateImportReviewSearch(true, false);
+    if (caseSensitive) caseSensitive.onchange = () => updateImportReviewSearch(true, false);
     if (previous) previous.onclick = () => navigateImportReviewSearch(-1);
     if (next) next.onclick = () => navigateImportReviewSearch(1);
 }
@@ -599,6 +610,92 @@ function renderImportReviewChapterList() {
         button.onclick = () => selectImportReviewChapter(index);
         list.appendChild(button);
     });
+    updateImportReviewMobileNavigation();
+}
+
+function showImportReviewActionFeedback(message) {
+    const feedback = document.getElementById('import-review-action-feedback');
+    if (!feedback) return;
+    clearTimeout(importReviewFeedbackTimer);
+    feedback.textContent = message || '';
+    feedback.classList.add('is-visible');
+    importReviewFeedbackTimer = setTimeout(() => feedback.classList.remove('is-visible'), 2200);
+}
+
+function updateImportReviewMobileNavigation() {
+    const chaptersPanel = document.querySelector('.import-review-chapters');
+    const current = document.getElementById('import-review-mobile-current');
+    const toggle = document.getElementById('import-review-chapter-list-toggle');
+    if (!chaptersPanel || !importReviewState) return;
+    const total = importReviewState.chapters.length;
+    const currentLabel = `Chapter ${importReviewActiveIndex + 1} / ${total}`;
+    const collapsed = chaptersPanel.classList.contains('is-mobile-collapsed');
+    if (current) current.textContent = currentLabel;
+    if (toggle) {
+        toggle.textContent = `章一覧（${total}章） ${collapsed ? '▼' : '▲'}`;
+        toggle.setAttribute('aria-expanded', String(!collapsed));
+    }
+}
+
+function toggleImportReviewChapterList() {
+    const chaptersPanel = document.querySelector('.import-review-chapters');
+    if (!chaptersPanel) return;
+    chaptersPanel.classList.toggle('is-mobile-collapsed');
+    updateImportReviewMobileNavigation();
+}
+
+function toggleImportReviewSearch() {
+    const searchBar = document.querySelector('.import-review-search-bar');
+    const toggle = document.getElementById('import-review-search-toggle');
+    const input = document.getElementById('import-review-search-input');
+    if (!searchBar) return;
+    const isOpen = searchBar.classList.toggle('is-mobile-open');
+    if (!isOpen) searchBar.classList.remove('is-mobile-options-open');
+    if (toggle) {
+        toggle.textContent = isOpen ? '×' : '🔍';
+        toggle.setAttribute('aria-label', isOpen ? '本文検索を閉じる' : '本文検索を開く');
+        toggle.setAttribute('aria-expanded', String(isOpen));
+    }
+    if (isOpen && input) setTimeout(() => input.focus(), 0);
+}
+
+function toggleImportReviewSearchOptions() {
+    const searchBar = document.querySelector('.import-review-search-bar');
+    if (searchBar) searchBar.classList.toggle('is-mobile-options-open');
+}
+
+function toggleImportReviewChapterActions() {
+    const menu = document.getElementById('import-review-chapter-actions-menu');
+    const toggle = document.getElementById('import-review-chapter-actions-toggle');
+    if (!menu || !toggle) return;
+    const isOpen = menu.hidden;
+    hideImportReviewFormatActions();
+    menu.hidden = !isOpen;
+    toggle.setAttribute('aria-expanded', String(isOpen));
+}
+
+function hideImportReviewChapterActions() {
+    const menu = document.getElementById('import-review-chapter-actions-menu');
+    const toggle = document.getElementById('import-review-chapter-actions-toggle');
+    if (menu) menu.hidden = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function toggleImportReviewFormatActions() {
+    const menu = document.getElementById('import-review-format-actions-menu');
+    const toggle = document.getElementById('import-review-format-actions-toggle');
+    if (!menu || !toggle) return;
+    const isOpen = menu.hidden;
+    hideImportReviewChapterActions();
+    menu.hidden = !isOpen;
+    toggle.setAttribute('aria-expanded', String(isOpen));
+}
+
+function hideImportReviewFormatActions() {
+    const menu = document.getElementById('import-review-format-actions-menu');
+    const toggle = document.getElementById('import-review-format-actions-toggle');
+    if (menu) menu.hidden = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
 }
 
 function renderImportReviewEditor() {
@@ -651,8 +748,7 @@ function selectImportReviewChapter(index) {
     importReviewActiveIndex = index;
     renderImportReviewChapterList();
     renderImportReviewEditor();
-    const isCurrentScope = importReviewSearchState.scope === 'current';
-    updateImportReviewSearch(isCurrentScope, false);
+    updateImportReviewSearch(true, false);
 }
 
 function getImportReviewSearchMatches() {
@@ -705,10 +801,12 @@ function updateImportReviewSearch(resetIndex = true, shouldFocus = false) {
     importReviewSearchState.matches = getImportReviewSearchMatches();
     if (importReviewSearchState.matches.length === 0) {
         importReviewSearchState.currentIndex = -1;
-    } else if (resetIndex || oldIndex < 0) {
-        importReviewSearchState.currentIndex = 0;
+    } else if (resetIndex) {
+        importReviewSearchState.currentIndex = -1;
     } else {
-        importReviewSearchState.currentIndex = Math.min(oldIndex, importReviewSearchState.matches.length - 1);
+        importReviewSearchState.currentIndex = oldIndex < 0
+            ? -1
+            : Math.min(oldIndex, importReviewSearchState.matches.length - 1);
     }
 
     const displayIndex = importReviewSearchState.currentIndex >= 0
@@ -734,24 +832,79 @@ function focusImportReviewSearchMatch() {
     const textarea = document.getElementById('import-review-chapter-content');
     if (!textarea) return;
     const apply = () => {
-        textarea.focus();
+        textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(match.start, match.end);
-        const maxScroll = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
-        const ratio = textarea.value.length > 0 ? match.start / textarea.value.length : 0;
-        textarea.scrollTop = maxScroll * ratio;
+        scrollTextareaOffsetIntoView(textarea, match.start);
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
     else setTimeout(apply, 0);
 }
 
+function scrollTextareaOffsetIntoView(textarea, offset) {
+    if (!textarea || typeof document === 'undefined' || typeof getComputedStyle !== 'function') return;
+
+    const computed = getComputedStyle(textarea);
+    const paddingLeft = parseFloat(computed.paddingLeft) || 0;
+    const paddingRight = parseFloat(computed.paddingRight) || 0;
+    const mirror = document.createElement('div');
+    const marker = document.createElement('span');
+    const value = String(textarea.value || '');
+    const safeOffset = Math.max(0, Math.min(Number(offset) || 0, value.length));
+
+    Object.assign(mirror.style, {
+        position: 'fixed',
+        left: '-10000px',
+        top: '0',
+        visibility: 'hidden',
+        pointerEvents: 'none',
+        overflow: 'hidden',
+        whiteSpace: 'pre-wrap',
+        overflowWrap: computed.overflowWrap || 'break-word',
+        wordBreak: computed.wordBreak,
+        tabSize: computed.tabSize,
+        boxSizing: 'content-box',
+        width: `${Math.max(0, textarea.clientWidth - paddingLeft - paddingRight)}px`,
+        padding: computed.padding,
+        border: '0',
+        fontFamily: computed.fontFamily,
+        fontSize: computed.fontSize,
+        fontStyle: computed.fontStyle,
+        fontWeight: computed.fontWeight,
+        lineHeight: computed.lineHeight,
+        letterSpacing: computed.letterSpacing,
+        textTransform: computed.textTransform,
+        textIndent: computed.textIndent
+    });
+
+    mirror.appendChild(document.createTextNode(value.slice(0, safeOffset)));
+    marker.textContent = '\u200b';
+    mirror.appendChild(marker);
+    mirror.appendChild(document.createTextNode(value.slice(safeOffset)));
+    document.body.appendChild(mirror);
+
+    const maxScroll = Math.max(0, textarea.scrollHeight - textarea.clientHeight);
+    const targetScroll = marker.offsetTop - (textarea.clientHeight * 0.35);
+    textarea.scrollTop = Math.max(0, Math.min(maxScroll, targetScroll));
+    mirror.remove();
+}
+
 function navigateImportReviewSearch(direction) {
     if (!importReviewSearchState.matches.length) return;
     const length = importReviewSearchState.matches.length;
-    const current = importReviewSearchState.currentIndex < 0 ? 0 : importReviewSearchState.currentIndex;
-    importReviewSearchState.currentIndex = (current + direction + length) % length;
+    if (importReviewSearchState.currentIndex < 0) {
+        importReviewSearchState.currentIndex = direction < 0 ? length - 1 : 0;
+    } else {
+        importReviewSearchState.currentIndex = (importReviewSearchState.currentIndex + direction + length) % length;
+    }
     const count = document.getElementById('import-review-search-count');
     if (count) count.textContent = `${importReviewSearchState.currentIndex + 1} / ${length}`;
     focusImportReviewSearchMatch();
+}
+
+function handleImportReviewSearchKeydown(event) {
+    if (event?.isComposing || event?.keyCode === 229 || event?.key !== 'Enter') return;
+    event.preventDefault();
+    navigateImportReviewSearch(event.shiftKey ? -1 : 1);
 }
 
 function addImportReviewChapter() {
@@ -889,6 +1042,7 @@ function joinImportReviewWrappedLines() {
     const chapter = getImportReviewChapter();
     if (!chapter) return;
     syncImportReviewEditor();
+    const originalContent = String(chapter.content || '');
     const paragraphs = String(chapter.content || '')
         .replace(/\r\n?/gu, '\n')
         .split(/\n\s*\n/gu)
@@ -896,14 +1050,18 @@ function joinImportReviewWrappedLines() {
         .filter(Boolean);
     chapter.content = paragraphs.join('\n\n');
     renderImportReview();
-    setImportReviewStatus('現在chapterの折り返し改行を結合しました。');
+    const changed = chapter.content !== originalContent;
+    const message = changed ? '折り返し改行を結合しました。' : '結合できる折り返し改行はありません。';
+    setImportReviewStatus(message);
+    showImportReviewActionFeedback(message);
 }
 
 function normalizeImportReviewParagraphSpacing() {
     const chapter = getImportReviewChapter();
     if (!chapter) return;
     syncImportReviewEditor();
-    chapter.content = String(chapter.content || '')
+    const originalContent = String(chapter.content || '');
+    chapter.content = originalContent
         .replace(/\r\n?/gu, '\n')
         .split('\n')
         .map(line => line.replace(/[ \t]+/gu, ' ').replace(/\s+$/u, ''))
@@ -911,7 +1069,9 @@ function normalizeImportReviewParagraphSpacing() {
         .replace(/\n{3,}/gu, '\n\n')
         .trim();
     renderImportReview();
-    setImportReviewStatus('現在chapterの段落間隔を整理しました。');
+    const message = chapter.content !== originalContent ? '段落間隔を整理しました。' : '段落間隔はすでに整っています。';
+    setImportReviewStatus(message);
+    showImportReviewActionFeedback(message);
 }
 
 async function handleFileUpload(event) {
@@ -1363,9 +1523,9 @@ async function switchToChapter(chapterId, options = {}) {
     await saveToDB();
 
     currentChapterId = target.id;
-    if (!options.preserveSearch) resetReaderSearch();
     renderChapterNavigation();
     renderArticleText();
+    reapplyReaderSearchForCurrentContent();
     renderList(currentTab, document.getElementById('list-search')?.value || '');
     renderBookmarks();
 
@@ -1414,9 +1574,9 @@ function openArticle(id) {
     document.getElementById('display-url').href = currentArticle.url || '#';
     document.getElementById('display-url').style.display = currentArticle.url ? 'inline' : 'none';
 
-    resetReaderSearch();
     renderChapterNavigation();
     renderArticleText();
+    reapplyReaderSearchForCurrentContent();
     renderList('words');
     renderBookmarks();
     restoreReadingPosition(getSavedPositionForChapter(currentArticle, currentChapterId));
@@ -1888,7 +2048,6 @@ function restoreReadingPosition(position) {
 }
 
 function rerenderReaderAtPosition(position) {
-    const previousSearchIndex = readerSearchState.currentIndex;
     renderArticleText();
 
     if (readerSearchState.query) {
@@ -1899,20 +2058,15 @@ function rerenderReaderAtPosition(position) {
                 readerSearchState.wholeWord,
                 readerSearchState.caseSensitive
             );
-            const index = Math.max(0, Math.min(previousSearchIndex >= 0 ? previousSearchIndex : 0, readerSearchState.results.length - 1));
-            if (readerSearchState.results.length) void setBookSearchResult(index, false);
-            else updateSearchCount();
+            readerSearchState.currentIndex = -1;
+            applySearchHighlights();
+            updateSearchCount();
             restoreReadingPosition(position);
             return;
         }
         applySearchHighlights();
-        if (readerSearchState.matches.length > 0) {
-            const index = Math.max(0, Math.min(
-                previousSearchIndex >= 0 ? previousSearchIndex : 0,
-                readerSearchState.matches.length - 1
-            ));
-            setActiveSearchResult(index, false);
-        }
+        readerSearchState.currentIndex = -1;
+        updateSearchCount();
     } else {
         readerSearchState.matches = [];
         readerSearchState.currentIndex = -1;
@@ -1953,7 +2107,31 @@ function closeModal() {
     globalVocabularyEditRef = null;
     selectedReaderCapture = null;
 }
-function togglePanel() { document.getElementById('side-panel').classList.toggle('is-open'); }
+function togglePanel() {
+    const panel = document.getElementById('side-panel');
+    if (!panel) return;
+    const opening = !panel.classList.contains('is-open');
+    panel.classList.toggle('is-open');
+    if (opening) panel.classList.remove('is-expanded');
+    updateMobilePanelSizeButton();
+}
+
+function updateMobilePanelSizeButton() {
+    const panel = document.getElementById('side-panel');
+    const button = document.getElementById('panel-expand-btn');
+    if (!panel || !button) return;
+    const expanded = panel.classList.contains('is-expanded');
+    button.textContent = expanded ? '⤡' : '⤢';
+    button.setAttribute('aria-label', expanded ? '単語帳を縮小' : '単語帳を拡大');
+    button.setAttribute('aria-pressed', String(expanded));
+}
+
+function toggleMobilePanelSize() {
+    const panel = document.getElementById('side-panel');
+    if (!panel) return;
+    panel.classList.toggle('is-expanded');
+    updateMobilePanelSizeButton();
+}
 function countEnglishWords(text) {
     return getEnglishTokens(text).length;
 }
@@ -1974,10 +2152,37 @@ function getArticleSearchableText(article) {
 
 function getReaderWordCounts(article = currentArticle) {
     const chapterText = article === currentArticle ? getCurrentChapterContent() : getArticleChapters(article)[0]?.content || '';
+    const bookText = getArticleFullText(article);
+    const bookChars = hasStoredChapters(article)
+        ? getArticleChapters(article).reduce((sum, chapter) => sum + String(chapter.content || '').length, 0)
+        : bookText.length;
     return {
         chapter: countEnglishWords(chapterText),
-        book: countEnglishWords(getArticleFullText(article))
+        book: countEnglishWords(bookText),
+        chapterChars: chapterText.length,
+        bookChars
     };
+}
+
+function clampReaderProgress(value) {
+    return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+}
+
+function getChapterScrollProgress(display) {
+    const maxScroll = Math.max(0, display.scrollHeight - display.clientHeight);
+    return maxScroll > 0 ? clampReaderProgress(display.scrollTop / maxScroll) : 0;
+}
+
+function getBookScrollProgress(article, chapterProgress) {
+    const chapters = getArticleChapters(article);
+    if (!hasStoredChapters(article) || chapters.length <= 1) return chapterProgress;
+    const currentIndex = chapters.findIndex(chapter => String(chapter.id) === String(getCurrentChapterId()));
+    const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+    const lengths = chapters.map(chapter => String(chapter.content || '').length);
+    const totalLength = lengths.reduce((sum, length) => sum + length, 0);
+    if (totalLength <= 0) return 0;
+    const completedLength = lengths.slice(0, safeIndex).reduce((sum, length) => sum + length, 0);
+    return clampReaderProgress((completedLength + (lengths[safeIndex] || 0) * chapterProgress) / totalLength);
 }
 
 function normalizeVocabularyWord(value) {
@@ -2016,13 +2221,31 @@ function updateProgress(event, forceWordCount = false) {
         if (statusBar) {
             statusBar.dataset.chapterWordCount = String(readerWordCounts.chapter);
             statusBar.dataset.bookWordCount = String(readerWordCounts.book);
+            statusBar.dataset.chapterCharCount = String(readerWordCounts.chapterChars);
+            statusBar.dataset.bookCharCount = String(readerWordCounts.bookChars);
         }
     }
+    const chapterProgress = getChapterScrollProgress(d);
+    const bookProgress = getBookScrollProgress(currentArticle, chapterProgress);
+    const hasMultipleChapters = hasStoredChapters(currentArticle) && getCurrentChapters().length > 1;
     const wordCount = document.getElementById('word-count');
     if (wordCount) wordCount.innerText = `${readerWordCounts.chapter.toLocaleString()} words`;
-    document.getElementById('char-count').innerText = `${content.length.toLocaleString()}文字`;
-    const progress = Math.round((d.scrollTop / Math.max(1, d.scrollHeight - d.clientHeight)) * 100) || 0;
-    document.getElementById('read-progress').innerText = `${progress}%`;
+    const charCount = document.getElementById('char-count');
+    if (charCount) charCount.innerText = `${readerWordCounts.chapterChars.toLocaleString()}文字`;
+    const progress = Math.round(chapterProgress * 100);
+    const readProgress = document.getElementById('read-progress');
+    if (readProgress) readProgress.innerText = `${progress}%`;
+
+    const chapterLabel = document.getElementById('chapter-status-label');
+    const bookLine = document.getElementById('book-status-line');
+    if (chapterLabel) chapterLabel.style.display = hasMultipleChapters ? '' : 'none';
+    if (bookLine) bookLine.style.display = hasMultipleChapters ? '' : 'none';
+    const bookWordCount = document.getElementById('book-word-count');
+    const bookCharCount = document.getElementById('book-char-count');
+    const bookReadProgress = document.getElementById('book-read-progress');
+    if (bookWordCount) bookWordCount.innerText = `${readerWordCounts.book.toLocaleString()} words`;
+    if (bookCharCount) bookCharCount.innerText = `${readerWordCounts.bookChars.toLocaleString()}文字`;
+    if (bookReadProgress) bookReadProgress.innerText = `${Math.round(bookProgress * 100)}%`;
     if (event && event.type === 'scroll') scheduleReadingPositionSave();
 }
 function handleListSearch() { renderList(currentTab, document.getElementById('list-search').value); }
@@ -2116,85 +2339,259 @@ function getLibraryBackupCounts(items = libraryItems) {
     return {
         articles: articles.length,
         folders: (items || []).filter(item => item?.type === 'folder').length,
+        chapters: articles.reduce((sum, article) => sum + (Array.isArray(article.chapters) ? article.chapters.length : 0), 0),
         words: articles.reduce((sum, article) => sum + (Array.isArray(article.words) ? article.words.length : 0), 0),
-        notes: articles.reduce((sum, article) => sum + (Array.isArray(article.notes) ? article.notes.length : 0), 0)
+        notes: articles.reduce((sum, article) => sum + (Array.isArray(article.notes) ? article.notes.length : 0), 0),
+        bookmarks: articles.reduce((sum, article) => sum + (Array.isArray(article.bookmarks) ? article.bookmarks.length : 0), 0)
     };
 }
 
-function createSmartReaderBackup() {
+function isBackupObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function collectSmartReaderPersistentData() {
+    await saveToDB();
+    const keys = await db.keys();
+    const data = {};
+    for (const key of keys) data[key] = await db.getItem(key);
+
+    // 画面上の最新状態も必ず含め、将来追加されるLocalForage keyは上の走査で保持する。
+    data.library_items = libraryItems;
+    data.reader_settings = readerSettings;
+    return data;
+}
+
+async function createSmartReaderBackup() {
     return {
-        app: 'Smart Reader',
+        format: 'smart-reader-backup',
         backupVersion: 1,
         exportedAt: new Date().toISOString(),
-        library_items: libraryItems,
-        reader_settings: readerSettings
+        data: await collectSmartReaderPersistentData()
     };
 }
 
-function validateSmartReaderBackup(data) {
-    if (!data || data.app !== 'Smart Reader' || data.backupVersion !== 1 || !Array.isArray(data.library_items)) {
-        return { valid: false, error: 'Smart Readerのバックアップ形式ではありません。' };
+function normalizeSmartReaderBackup(raw) {
+    if (!isBackupObject(raw)) return null;
+    if (raw.format === 'smart-reader-backup') return { ...raw, legacy: false };
+
+    // Phase 4初期版で書き出したbackupも復元可能にする。
+    if (raw.app === 'Smart Reader' && raw.backupVersion === 1 && Array.isArray(raw.library_items)) {
+        return {
+            format: 'smart-reader-backup',
+            backupVersion: 1,
+            exportedAt: raw.exportedAt,
+            data: {
+                library_items: raw.library_items,
+                reader_settings: isBackupObject(raw.reader_settings)
+                    ? raw.reader_settings
+                    : { ...DEFAULT_READER_SETTINGS }
+            },
+            legacy: true
+        };
     }
-    if (data.reader_settings !== undefined && (typeof data.reader_settings !== 'object' || Array.isArray(data.reader_settings))) {
-        return { valid: false, error: 'reader_settingsの形式が不正です。' };
-    }
-    if (!data.library_items.every(item => item && typeof item === 'object' && typeof item.type === 'string')) {
-        return { valid: false, error: 'ライブラリ項目の形式が不正です。' };
-    }
-    return { valid: true, counts: getLibraryBackupCounts(data.library_items) };
+    return null;
 }
 
-function exportSmartReaderBackup() {
-    const json = JSON.stringify(createSmartReaderBackup(), null, 2);
+function validateSmartReaderBackup(raw) {
+    const backup = normalizeSmartReaderBackup(raw);
+    if (!backup || backup.format !== 'smart-reader-backup') {
+        return { valid: false, error: 'Smart Readerのバックアップ形式ではありません。' };
+    }
+    if (backup.backupVersion !== 1) {
+        return { valid: false, error: `このバックアップVersion（${String(backup.backupVersion)}）には対応していません。` };
+    }
+    if (!isBackupObject(backup.data) || !Array.isArray(backup.data.library_items)) {
+        return { valid: false, error: 'バックアップ内のdataまたはlibrary_itemsが不正です。' };
+    }
+    if (backup.data.reader_settings !== undefined && !isBackupObject(backup.data.reader_settings)) {
+        return { valid: false, error: 'reader_settingsの形式が不正です。' };
+    }
+    if (!backup.data.library_items.every(item => isBackupObject(item) && typeof item.type === 'string')) {
+        return { valid: false, error: 'ライブラリ項目の形式が不正です。' };
+    }
+    if (backup.data.reader_settings === undefined) {
+        backup.data = { ...backup.data, reader_settings: { ...DEFAULT_READER_SETTINGS } };
+    }
+    return {
+        valid: true,
+        backup,
+        counts: getLibraryBackupCounts(backup.data.library_items)
+    };
+}
+
+function createBackupFilename(prefix, exportedAt = new Date().toISOString()) {
+    const timestamp = String(exportedAt || new Date().toISOString())
+        .replace(/[:.]/g, '-')
+        .replace('T', '_')
+        .replace('Z', '');
+    return `${prefix}-${timestamp}.json`;
+}
+
+function downloadSmartReaderBackup(backup, prefix = 'smart-reader-backup') {
+    const json = JSON.stringify(backup, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.href = url;
-    link.download = `smart-reader-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = createBackupFilename(prefix, backup.exportedAt);
+    document.body.appendChild(link);
     link.click();
+    link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function exportSmartReaderBackup() {
+    try {
+        const backup = await createSmartReaderBackup();
+        downloadSmartReaderBackup(backup);
+    } catch (error) {
+        console.error(error);
+        alert('バックアップを書き出せませんでした。');
+    }
 }
 
 function openSmartReaderRestore() {
     const input = document.getElementById('backup-file-input');
-    if (input) input.click();
+    if (input) {
+        input.value = '';
+        input.click();
+    }
 }
 
 async function handleSmartReaderRestore(event) {
     const file = event?.target?.files?.[0];
     if (!file) return;
     try {
-        const data = JSON.parse(await file.text());
-        const validation = validateSmartReaderBackup(data);
+        const parsed = JSON.parse(await file.text());
+        const validation = validateSmartReaderBackup(parsed);
         if (!validation.valid) {
             alert(validation.error);
             return;
         }
-        const counts = validation.counts;
-        if (!confirm(`現在のデータを置き換えます。\n記事: ${counts.articles}\nフォルダ: ${counts.folders}\n単語: ${counts.words}\nノート: ${counts.notes}\n\n続行しますか？`)) return;
-        const previousItems = libraryItems;
-        const previousSettings = readerSettings;
-        try {
-            await db.setItem('library_items', data.library_items);
-            await db.setItem('reader_settings', data.reader_settings || previousSettings);
-            libraryItems = data.library_items;
-            readerSettings = data.reader_settings || previousSettings;
-            currentArticle = null;
-            currentChapterId = null;
-            currentFolderId = null;
-            applySettings();
-            showLibrary();
-            alert('バックアップを復元しました。');
-        } catch (error) {
-            libraryItems = previousItems;
-            readerSettings = previousSettings;
-            throw error;
-        }
+        pendingSmartReaderRestore = {
+            backup: validation.backup,
+            counts: validation.counts,
+            fileName: file.name
+        };
+        showSmartReaderRestorePreview();
     } catch (error) {
         console.error(error);
-        alert('復元できませんでした。JSONファイルを確認してください。');
+        alert('JSONを読み込めませんでした。ファイルが壊れていないか確認してください。');
     } finally {
         event.target.value = '';
+    }
+}
+
+function setRestorePreviewText(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = String(value ?? '');
+}
+
+function showSmartReaderRestorePreview() {
+    if (!pendingSmartReaderRestore) return;
+    const { backup, counts, fileName } = pendingSmartReaderRestore;
+    const exportedDate = new Date(backup.exportedAt);
+    setRestorePreviewText('backup-restore-file', fileName || 'backup.json');
+    setRestorePreviewText('backup-restore-date', Number.isNaN(exportedDate.getTime())
+        ? '作成日時: 不明'
+        : `作成日時: ${exportedDate.toLocaleString('ja-JP')}`);
+    ['articles', 'folders', 'chapters', 'words', 'notes', 'bookmarks'].forEach(key => {
+        setRestorePreviewText(`backup-count-${key}`, counts[key] || 0);
+    });
+    const status = document.getElementById('backup-restore-status');
+    if (status) {
+        status.textContent = '';
+        status.classList.remove('is-error');
+    }
+    document.getElementById('backup-restore-overlay')?.classList.add('show');
+}
+
+function closeSmartReaderRestorePreview(force = false) {
+    const confirmButton = document.getElementById('backup-restore-confirm');
+    if (!force && confirmButton?.disabled) return;
+    document.getElementById('backup-restore-overlay')?.classList.remove('show');
+    pendingSmartReaderRestore = null;
+}
+
+async function replaceSmartReaderPersistentData(targetData) {
+    const targetKeys = Object.keys(targetData);
+    const existingKeys = await db.keys();
+
+    for (const key of targetKeys) await db.setItem(key, targetData[key]);
+    for (const key of existingKeys) {
+        if (!targetKeys.includes(key)) await db.removeItem(key);
+    }
+
+    const finalKeys = await db.keys();
+    if (finalKeys.length !== targetKeys.length || targetKeys.some(key => !finalKeys.includes(key))) {
+        throw new Error('LocalForage key verification failed');
+    }
+    for (const key of targetKeys) {
+        const restoredValue = await db.getItem(key);
+        if (JSON.stringify(restoredValue) !== JSON.stringify(targetData[key])) {
+            throw new Error(`LocalForage value verification failed: ${key}`);
+        }
+    }
+}
+
+async function confirmSmartReaderRestore() {
+    if (!pendingSmartReaderRestore) return;
+    const confirmButton = document.getElementById('backup-restore-confirm');
+    const cancelButton = document.getElementById('backup-restore-cancel');
+    const status = document.getElementById('backup-restore-status');
+    if (confirmButton) confirmButton.disabled = true;
+    if (cancelButton) cancelButton.disabled = true;
+    if (status) {
+        status.textContent = '復元前の安全バックアップを作成しています…';
+        status.classList.remove('is-error');
+    }
+
+    let safetyBackup = null;
+    try {
+        safetyBackup = await createSmartReaderBackup();
+        downloadSmartReaderBackup(safetyBackup, 'smart-reader-pre-restore');
+        if (status) status.textContent = 'データを復元しています…';
+
+        const restoreBackup = pendingSmartReaderRestore.backup;
+        await replaceSmartReaderPersistentData(restoreBackup.data);
+
+        libraryItems = restoreBackup.data.library_items;
+        readerSettings = { ...DEFAULT_READER_SETTINGS, ...restoreBackup.data.reader_settings };
+        currentArticle = null;
+        currentChapterId = null;
+        currentFolderId = null;
+        pendingImportedDocument = null;
+        importReviewState = null;
+        applySettings();
+        closeSmartReaderRestorePreview(true);
+        showLibrary();
+        alert('バックアップを復元しました。復元前のデータもJSONで保存しました。');
+    } catch (error) {
+        console.error(error);
+        let rolledBack = false;
+        if (safetyBackup) {
+            try {
+                await replaceSmartReaderPersistentData(safetyBackup.data);
+                libraryItems = safetyBackup.data.library_items;
+                readerSettings = { ...DEFAULT_READER_SETTINGS, ...safetyBackup.data.reader_settings };
+                rolledBack = true;
+            } catch (rollbackError) {
+                console.error('Smart Reader restore rollback failed', rollbackError);
+            }
+        }
+        if (status) {
+            status.textContent = rolledBack
+                ? '復元に失敗したため、元のデータへ戻しました。'
+                : '復元に失敗しました。安全バックアップJSONを保管してください。';
+            status.classList.add('is-error');
+        }
+        alert(rolledBack
+            ? '復元に失敗しました。現在のデータは元の状態へ戻しました。'
+            : '復元に失敗し、自動的に元へ戻せませんでした。安全バックアップJSONから復元してください。');
+    } finally {
+        if (confirmButton) confirmButton.disabled = false;
+        if (cancelButton) cancelButton.disabled = false;
     }
 }
 
@@ -2204,6 +2601,7 @@ function resetReaderSearch() {
         wholeWord: false,
         caseSensitive: false,
         scope: 'chapter',
+        articleId: null,
         currentIndex: -1,
         matches: [],
         results: []
@@ -2223,17 +2621,91 @@ function updateReaderSearchScopeUI() {
     if (!scope) return;
     const canSearchBook = hasStoredChapters(currentArticle) && getCurrentChapters().length > 1;
     scope.style.display = canSearchBook ? '' : 'none';
-    if (!canSearchBook) readerSearchState.scope = 'chapter';
     scope.value = readerSearchState.scope || 'chapter';
 }
 
 function changeReaderSearchScope(value) {
-    readerSearchState.scope = value === 'book' && hasStoredChapters(currentArticle) ? 'book' : 'chapter';
+    readerSearchState.scope = value === 'book' ? 'book' : 'chapter';
     searchInText();
 }
 
 function isBookWideSearchActive() {
     return readerSearchState.scope === 'book' && hasStoredChapters(currentArticle);
+}
+
+function syncReaderSearchControls() {
+    const input = document.getElementById('reader-search-input');
+    const wholeWord = document.getElementById('search-whole-word');
+    const caseSensitive = document.getElementById('search-case-sensitive');
+    if (input) input.value = readerSearchState.query;
+    if (wholeWord) wholeWord.checked = readerSearchState.wholeWord;
+    if (caseSensitive) caseSensitive.checked = readerSearchState.caseSensitive;
+    updateReaderSearchScopeUI();
+}
+
+function reapplyReaderSearchForCurrentContent() {
+    syncReaderSearchControls();
+    readerSearchState.matches = [];
+    readerSearchState.currentIndex = -1;
+    if (!readerSearchState.query || !currentArticle) {
+        readerSearchState.results = [];
+        updateSearchCount();
+        return;
+    }
+
+    readerSearchState.articleId = currentArticle.id;
+    if (isBookWideSearchActive()) {
+        readerSearchState.results = buildBookSearchResults(
+            currentArticle,
+            readerSearchState.query,
+            readerSearchState.wholeWord,
+            readerSearchState.caseSensitive
+        );
+        applySearchHighlights();
+        updateSearchCount();
+        return;
+    }
+
+    readerSearchState.results = [];
+    applySearchHighlights();
+    updateSearchCount();
+}
+
+function clearReaderSearch({ blur = false } = {}) {
+    const position = captureReadingPosition();
+    readerSearchState.query = '';
+    readerSearchState.currentIndex = -1;
+    readerSearchState.matches = [];
+    readerSearchState.results = [];
+    readerSearchState.articleId = currentArticle?.id || null;
+    const input = document.getElementById('reader-search-input');
+    if (input) input.value = '';
+    renderArticleText();
+    updateSearchCount();
+    restoreReadingPosition(position);
+    if (input) {
+        if (blur) input.blur();
+        else input.focus();
+    }
+}
+
+function handleReaderSearchFocus(event) {
+    const input = event?.target;
+    if (input && input.value) setTimeout(() => input.select(), 0);
+}
+
+function handleReaderSearchKeydown(event) {
+    if (event?.isComposing || event?.keyCode === 229) return;
+    if (event?.key === 'Escape') {
+        event.preventDefault();
+        clearReaderSearch({ blur: true });
+        return;
+    }
+    if (event?.key === 'Enter') {
+        event.preventDefault();
+        if (event.shiftKey) previousSearchResult();
+        else nextSearchResult();
+    }
 }
 
 function updateSearchCount() {
@@ -2385,13 +2857,16 @@ async function setBookSearchResult(index, shouldScroll = true) {
 function nextSearchResult() {
     if ((isBookWideSearchActive() ? readerSearchState.results : readerSearchState.matches).length === 0) return;
     setActiveSearchResult(readerSearchState.currentIndex + 1);
+    document.getElementById('reader-search-input')?.focus({ preventScroll: true });
 }
 
 function previousSearchResult() {
     if ((isBookWideSearchActive() ? readerSearchState.results : readerSearchState.matches).length === 0) return;
+    const total = isBookWideSearchActive() ? readerSearchState.results.length : readerSearchState.matches.length;
     setActiveSearchResult(readerSearchState.currentIndex < 0
-        ? readerSearchState.matches.length - 1
+        ? total - 1
         : readerSearchState.currentIndex - 1);
+    document.getElementById('reader-search-input')?.focus({ preventScroll: true });
 }
 
 function searchInText() {
@@ -2404,6 +2879,7 @@ function searchInText() {
     readerSearchState.query = query;
     readerSearchState.wholeWord = !!wholeWord?.checked;
     readerSearchState.caseSensitive = !!caseSensitive?.checked;
+    readerSearchState.articleId = currentArticle?.id || null;
     readerSearchState.currentIndex = -1;
     readerSearchState.matches = [];
     readerSearchState.results = isBookWideSearchActive()
@@ -2412,15 +2888,16 @@ function searchInText() {
 
     renderArticleText();
     if (!query) {
+        readerSearchState.results = [];
         updateSearchCount();
         restoreReadingPosition(position);
         return;
     }
 
     applySearchHighlights();
-    if (isBookWideSearchActive() && readerSearchState.results.length > 0) void setBookSearchResult(0);
-    else if (readerSearchState.matches.length > 0) setActiveSearchResult(0);
-    else restoreReadingPosition(position);
+    readerSearchState.currentIndex = -1;
+    updateSearchCount();
+    restoreReadingPosition(position);
 }
 
 window.addEventListener('pagehide', flushReadingPositionSave);
