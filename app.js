@@ -75,6 +75,7 @@ let selectedReaderCapture = null;
 let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
+let editingSourceIndex = null;
 let readingPositionSaveTimer = null;
 let suppressReadingPositionSave = false;
 let readingPositionRestoreToken = 0;
@@ -466,9 +467,24 @@ function getImportReviewChapter(index = importReviewActiveIndex) {
 
 function getSavedChapterReferenceCounts(article, chapterIds) {
     const ids = new Set((chapterIds || []).map(id => String(id)));
-    const countItems = items => Array.isArray(items)
-        ? items.filter(item => item && item.chapterId !== undefined && item.chapterId !== null && ids.has(String(item.chapterId))).length
-        : 0;
+    const countItems = items => {
+        if (!Array.isArray(items)) return { protected: 0, unscoped: 0 };
+        let protectedCount = 0;
+        let unscoped = 0;
+        items.forEach(item => {
+            if (!item) return;
+            if (item.chapterId === undefined || item.chapterId === null || item.chapterId === '') {
+                protectedCount += 1;
+                unscoped += 1;
+            } else if (ids.has(String(item.chapterId))) {
+                protectedCount += 1;
+            }
+        });
+        return { protected: protectedCount, unscoped };
+    };
+    const words = countItems(article?.words);
+    const notes = countItems(article?.notes);
+    const bookmarks = countItems(article?.bookmarks);
     let readingPositions = 0;
     if (article?.readingPosition?.chapterId !== undefined && ids.has(String(article.readingPosition.chapterId))) {
         readingPositions += 1;
@@ -478,9 +494,10 @@ function getSavedChapterReferenceCounts(article, chapterIds) {
             .filter(id => ids.has(String(id))).length;
     }
     return {
-        words: countItems(article?.words),
-        notes: countItems(article?.notes),
-        bookmarks: countItems(article?.bookmarks),
+        words: words.protected,
+        notes: notes.protected,
+        bookmarks: bookmarks.protected,
+        unscoped: words.unscoped + notes.unscoped + bookmarks.unscoped,
         readingPositions
     };
 }
@@ -504,6 +521,7 @@ function ensureSavedChapterStructureEditAllowed(chapterIndexes, operation) {
         `ノート: ${counts.notes}`,
         `しおり: ${counts.bookmarks}`,
         `読書位置: ${counts.readingPositions}`,
+        ...(counts.unscoped > 0 ? [`章情報なしのlegacyデータ: ${counts.unscoped}`] : []),
         '',
         `データとの関連を保護するため、現在はこの章を${operation}できません。`,
         '本文や章タイトルの編集は可能です。'
@@ -1706,16 +1724,20 @@ function renderList(type, filter = '') {
 
     applyAnkiMaskClass(container, type === 'words' && isAnkiMode, document.getElementById('anki-target-select')?.value);
 
-    let list = type === 'words' ? [...currentArticle.words] : [...currentArticle.notes];
-    if (type === 'words' && document.getElementById('hide-memorized-check')?.checked) list = list.filter(i => !i.memorized);
+    const sourceList = type === 'words' ? currentArticle.words : currentArticle.notes;
+    let list = sourceList.map((item, sourceIndex) => ({ item, sourceIndex }));
+    if (type === 'words' && document.getElementById('hide-memorized-check')?.checked) list = list.filter(entry => !entry.item.memorized);
 
     if (filter) {
         const q = filter.toLowerCase();
-        list = list.filter(i => type === 'words' ? (i.word+i.meaning+(i.memo||"")).toLowerCase().includes(q) : (i.originalText+i.translation+(i.extra||"")).toLowerCase().includes(q));
+        list = list.filter(({ item }) => type === 'words'
+            ? (item.word + item.meaning + (item.memo || '')).toLowerCase().includes(q)
+            : (item.originalText + item.translation + (item.extra || '')).toLowerCase().includes(q));
     }
 
-    list.forEach(item => {
+    list.forEach(({ item, sourceIndex }) => {
         const card = document.createElement('div');
+        const itemIdArgument = item.id === undefined ? 'undefined' : escapeHtml(JSON.stringify(item.id));
         const highlight = (t) => {
             const safe = escapeHtml(t);
             if (!filter) return safe;
@@ -1729,14 +1751,14 @@ function renderList(type, filter = '') {
             card.innerHTML = `
                 <div class="word-row">
                     <div class="word-left">
-                        <input type="checkbox" onchange="toggleMemorized(${item.id}, event)" onclick="event.stopPropagation()" ${item.memorized ? 'checked' : ''}>
+                        <input type="checkbox" onchange="toggleMemorized(${itemIdArgument}, event, ${sourceIndex})" onclick="event.stopPropagation()" ${item.memorized ? 'checked' : ''}>
                         <span onclick="event.stopPropagation(); speakWord('${item.word.replace(/'/g, "\\'")}')">🔊</span>
                         <span class="word-text">${highlight(item.word)}</span>
                     </div>
                     <div class="meaning-right">${highlight(item.meaning)}</div>
                 </div>
                 ${item.memo ? `<div class="memo-row">${highlight(item.memo)}</div>` : ''}
-                <div class="action-group"><button onclick="event.stopPropagation(); editItem(${item.id}, 'word')">編</button><button onclick="event.stopPropagation(); deleteListItem(${item.id}, 'words')">消</button></div>`;
+                <div class="action-group"><button onclick="event.stopPropagation(); editItem(${itemIdArgument}, 'word', ${sourceIndex})">編</button><button onclick="event.stopPropagation(); deleteListItem(${itemIdArgument}, 'words', ${sourceIndex})">消</button></div>`;
         } else {
             card.id = `note-card-${item.id}`;
             card.className = 'note-block-card';
@@ -1744,7 +1766,7 @@ function renderList(type, filter = '') {
                 <div class="block-english">${highlight(item.originalText)}</div>
                 <hr class="note-divider"><div class="block-memo">${highlight(item.translation)}</div>
                 ${item.extra ? `<div class="block-extra">💡 ${highlight(item.extra)}</div>` : ''}
-                <div class="note-footer"><button onclick="editItem(${item.id}, 'note')">編</button><button onclick="deleteListItem(${item.id}, 'notes')">消</button></div>`;
+                <div class="note-footer"><button onclick="editItem(${itemIdArgument}, 'note', ${sourceIndex})">編</button><button onclick="deleteListItem(${itemIdArgument}, 'notes', ${sourceIndex})">消</button></div>`;
         }
         container.appendChild(card);
     });
@@ -1768,11 +1790,12 @@ async function handleUnifiedSave(e) {
                 memo: document.getElementById('input-word-memo').value,
                 context: document.getElementById('input-word-context').value.trim()
             };
-            if (editingId) {
-                const old = currentArticle.words.find(i => i.id === editingId);
+            const editIndex = resolveArticleCollectionIndex(currentArticle.words, editingId, editingSourceIndex);
+            if (editIndex >= 0) {
+                const old = currentArticle.words[editIndex];
                 if (old) {
-                    currentArticle.words = currentArticle.words.map(i => {
-                        if (i.id !== editingId) return i;
+                    currentArticle.words = currentArticle.words.map((i, index) => {
+                        if (index !== editIndex) return i;
                         const updated = Object.assign({}, i, values);
                         if ((updated.chapterId === undefined || updated.chapterId === null) && activeChapterId) {
                             updated.chapterId = activeChapterId;
@@ -1791,14 +1814,15 @@ async function handleUnifiedSave(e) {
         } else {
             const activeChapterId = getActiveChapterIdForItem();
             const values = { originalText: document.getElementById('input-note-eng').value, translation: document.getElementById('input-note-trans').value, extra: document.getElementById('input-note-extra').value };
-            if (editingId) {
-                const old = currentArticle.notes.find(i => i.id === editingId);
+            const editIndex = resolveArticleCollectionIndex(currentArticle.notes, editingId, editingSourceIndex);
+            if (editIndex >= 0) {
+                const old = currentArticle.notes[editIndex];
                 if (old) {
                     const updated = Object.assign({}, old, values);
                     if ((updated.chapterId === undefined || updated.chapterId === null) && activeChapterId) {
                         updated.chapterId = activeChapterId;
                     }
-                    currentArticle.notes = currentArticle.notes.map(i => i.id === editingId ? updated : i);
+                    currentArticle.notes = currentArticle.notes.map((i, index) => index === editIndex ? updated : i);
                 }
             } else {
                 const n = { id: Date.now(), ...values };
@@ -1825,11 +1849,23 @@ function switchModalType(type) {
     if (r) r.checked = true;
 }
 
-function editItem(id, type) {
+function resolveArticleCollectionIndex(collection, id, sourceIndex) {
+    if (!Array.isArray(collection)) return -1;
+    if (id !== undefined && id !== null && id !== '') {
+        return collection.findIndex(item => item && String(item.id) === String(id));
+    }
+    return Number.isInteger(sourceIndex) && collection[sourceIndex] ? sourceIndex : -1;
+}
+
+function editItem(id, type, sourceIndex = null) {
     globalVocabularyEditRef = null;
-    editingId = id; switchModalType(type);
-    const item = type === 'word' ? currentArticle.words.find(i => i.id === id) : currentArticle.notes.find(i => i.id === id);
+    const collection = type === 'word' ? currentArticle.words : currentArticle.notes;
+    const itemIndex = resolveArticleCollectionIndex(collection, id, sourceIndex);
+    const item = itemIndex >= 0 ? collection[itemIndex] : null;
     if (!item) return;
+    editingId = item.id;
+    editingSourceIndex = itemIndex;
+    switchModalType(type);
     if (type === 'word') {
         document.getElementById('input-word-text').value = item.word;
         document.getElementById('input-word-meaning').value = item.meaning;
@@ -1851,6 +1887,7 @@ function openUnifiedModal() {
     }
     globalVocabularyEditRef = null;
     editingId = null; // 編集ではなく新規作成モードにする
+    editingSourceIndex = null;
     
     // 入力欄をリセット（選択テキストがあれば自動入力）
     document.getElementById('input-word-text').value = selectedText || "";
@@ -2109,6 +2146,7 @@ function hideAllSections() { ['library-section', 'vocabulary-section', 'input-ar
 function closeModal() {
     document.getElementById('unified-modal-overlay').classList.remove('show');
     editingId = null;
+    editingSourceIndex = null;
     globalVocabularyEditRef = null;
     selectedReaderCapture = null;
 }
@@ -2254,9 +2292,10 @@ function updateProgress(event, forceWordCount = false) {
     if (event && event.type === 'scroll') scheduleReadingPositionSave();
 }
 function handleListSearch() { renderList(currentTab, document.getElementById('list-search').value); }
-async function toggleMemorized(id, e) {
+async function toggleMemorized(id, e, sourceIndex = null) {
     if (e) e.stopPropagation();
-    const w = currentArticle.words.find(i => i.id === id);
+    const wordIndex = resolveArticleCollectionIndex(currentArticle.words, id, sourceIndex);
+    const w = wordIndex >= 0 ? currentArticle.words[wordIndex] : null;
     if (!w) return;
     const readingPosition = rememberReadingPosition();
     w.memorized = !w.memorized;
@@ -2270,11 +2309,13 @@ function renderSettingsUI(c) { c.innerHTML = `<div class="settings-group"><p>文
 function updateSetting(t, v) { if (t==='font') readerSettings.fontSize=v; else readerSettings.lineHeight=v; applySettings(); db.setItem('reader_settings', readerSettings); renderList('settings'); }
 function createNewFolder() { const n = prompt("フォルダ名"); if(n){ libraryItems.push({id:Date.now(), type:'folder', name:n, parentId:currentFolderId}); saveToDB(); showLibrary(); } }
 async function deleteLibraryItem(id) { if(confirm("削除しますか？")){ libraryItems = libraryItems.filter(i=>i.id!==id); await saveToDB(); showLibrary(); } }
-async function deleteListItem(id, type) {
+async function deleteListItem(id, type, sourceIndex = null) {
     if (!confirm("消去しますか？")) return;
     const readingPosition = rememberReadingPosition();
-    if (type === 'words') currentArticle.words = currentArticle.words.filter(i => i.id !== id);
-    else currentArticle.notes = currentArticle.notes.filter(i => i.id !== id);
+    const collection = type === 'words' ? currentArticle.words : currentArticle.notes;
+    const itemIndex = resolveArticleCollectionIndex(collection, id, sourceIndex);
+    if (itemIndex < 0) return;
+    collection.splice(itemIndex, 1);
     await saveToDB();
     renderList(type);
     rerenderReaderAtPosition(readingPosition);
@@ -2519,18 +2560,27 @@ function closeSmartReaderRestorePreview(force = false) {
     pendingSmartReaderRestore = null;
 }
 
-async function replaceSmartReaderPersistentData(targetData) {
+async function replaceSmartReaderPersistentData(targetData, options = {}) {
     const targetKeys = Object.keys(targetData);
     const existingKeys = await db.keys();
+    const removeAbsentKeys = options.removeAbsentKeys === true;
+    const writeKeys = targetKeys.filter(key => key !== 'library_items');
+    if (targetKeys.includes('library_items')) writeKeys.push('library_items');
 
-    for (const key of targetKeys) await db.setItem(key, targetData[key]);
-    for (const key of existingKeys) {
-        if (!targetKeys.includes(key)) await db.removeItem(key);
+    // 記事本体は最後に書き込み、他keyの失敗でlibrary_itemsだけが先行更新されるのを避ける。
+    for (const key of writeKeys) await db.setItem(key, targetData[key]);
+    if (removeAbsentKeys) {
+        for (const key of existingKeys) {
+            if (!targetKeys.includes(key)) await db.removeItem(key);
+        }
     }
 
     const finalKeys = await db.keys();
-    if (finalKeys.length !== targetKeys.length || targetKeys.some(key => !finalKeys.includes(key))) {
+    if (targetKeys.some(key => !finalKeys.includes(key))) {
         throw new Error('LocalForage key verification failed');
+    }
+    if (removeAbsentKeys && finalKeys.length !== targetKeys.length) {
+        throw new Error('LocalForage exact key verification failed');
     }
     for (const key of targetKeys) {
         const restoredValue = await db.getItem(key);
@@ -2577,7 +2627,7 @@ async function confirmSmartReaderRestore() {
         let rolledBack = false;
         if (safetyBackup) {
             try {
-                await replaceSmartReaderPersistentData(safetyBackup.data);
+                await replaceSmartReaderPersistentData(safetyBackup.data, { removeAbsentKeys: true });
                 libraryItems = safetyBackup.data.library_items;
                 readerSettings = { ...DEFAULT_READER_SETTINGS, ...safetyBackup.data.reader_settings };
                 rolledBack = true;
