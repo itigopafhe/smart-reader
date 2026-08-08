@@ -1790,13 +1790,18 @@ async function handleUnifiedSave(e) {
             }
         } else {
             const activeChapterId = getActiveChapterIdForItem();
-            const n = { id: editingId || Date.now(), originalText: document.getElementById('input-note-eng').value, translation: document.getElementById('input-note-trans').value, extra: document.getElementById('input-note-extra').value };
+            const values = { originalText: document.getElementById('input-note-eng').value, translation: document.getElementById('input-note-trans').value, extra: document.getElementById('input-note-extra').value };
             if (editingId) {
                 const old = currentArticle.notes.find(i => i.id === editingId);
-                if (old?.chapterId !== undefined && old?.chapterId !== null) n.chapterId = old.chapterId;
-                else if (activeChapterId) n.chapterId = activeChapterId;
-                currentArticle.notes = currentArticle.notes.map(i => i.id === editingId ? n : i);
+                if (old) {
+                    const updated = Object.assign({}, old, values);
+                    if ((updated.chapterId === undefined || updated.chapterId === null) && activeChapterId) {
+                        updated.chapterId = activeChapterId;
+                    }
+                    currentArticle.notes = currentArticle.notes.map(i => i.id === editingId ? updated : i);
+                }
             } else {
+                const n = { id: Date.now(), ...values };
                 if (activeChapterId) n.chapterId = activeChapterId;
                 currentArticle.notes.push(n);
             }
@@ -2914,6 +2919,10 @@ function globalIdsEqual(left, right) {
     return String(left) === String(right);
 }
 
+function hasGlobalWordId(wordId) {
+    return wordId !== undefined && wordId !== null && wordId !== '';
+}
+
 function getGlobalArticleTitle(article) {
     return String(article?.name || article?.title || '無題');
 }
@@ -2925,7 +2934,7 @@ function getGlobalChapterInfo(article, word) {
 
     const chapterId = word.chapterId;
     const chapters = Array.isArray(article?.chapters) ? article.chapters : [];
-    const chapter = chapters.find(item => globalIdsEqual(item.id, chapterId));
+    const chapter = chapters.find(item => item && globalIdsEqual(item.id, chapterId));
     return {
         id: chapterId,
         title: String(chapter?.title || chapterId)
@@ -2939,20 +2948,21 @@ function collectGlobalVocabulary() {
     libraryItems
         .filter(item => item && item.type === 'article')
         .forEach(article => {
-            ensureArticleCollections(article);
-            article.words.forEach((word, wordIndex) => {
+            const words = Array.isArray(article.words) ? article.words : [];
+            words.forEach((word, sourceIndex) => {
                 const chapter = getGlobalChapterInfo(article, word);
-                const wordKey = word?.id !== undefined && word?.id !== null
-                    ? word.id
-                    : wordIndex;
+                const wordId = word?.id;
+                const key = hasGlobalWordId(wordId)
+                    ? `${String(article.id)}::id::${String(wordId)}`
+                    : `${String(article.id)}::index::${String(sourceIndex)}`;
                 entries.push({
-                    key: String(article.id) + '::' + String(wordKey) + '::' + String(wordIndex),
+                    key,
                     articleId: article.id,
                     articleTitle: getGlobalArticleTitle(article),
                     chapterId: chapter.id,
                     chapterTitle: chapter.title,
-                    wordId: word?.id,
-                    wordIndex,
+                    wordId,
+                    sourceIndex,
                     word,
                     wordText: String(word?.word || ''),
                     meaning: String(word?.meaning || ''),
@@ -2972,16 +2982,21 @@ function findGlobalEntry(key) {
     return globalVocabularyState.entries.find(entry => entry.key === String(key)) || null;
 }
 
+function resolveGlobalWordSourceIndex(words, wordId, sourceIndex) {
+    if (!Array.isArray(words)) return -1;
+    if (hasGlobalWordId(wordId)) {
+        return words.findIndex(word => word && globalIdsEqual(word.id, wordId));
+    }
+    return Number.isInteger(sourceIndex) && words[sourceIndex] ? sourceIndex : -1;
+}
+
 function getGlobalEntrySource(entry) {
     if (!entry) return null;
     const article = libraryItems.find(item => item.type === 'article' && globalIdsEqual(item.id, entry.articleId));
     if (!article) return null;
     ensureArticleCollections(article);
 
-    let index = Number.isInteger(entry.wordIndex) ? entry.wordIndex : -1;
-    if (index < 0 || !article.words[index] || (entry.wordId !== undefined && !globalIdsEqual(article.words[index].id, entry.wordId))) {
-        index = article.words.findIndex(word => entry.wordId !== undefined && globalIdsEqual(word.id, entry.wordId));
-    }
+    const index = resolveGlobalWordSourceIndex(article.words, entry.wordId, entry.sourceIndex);
     if (index < 0 || !article.words[index]) return null;
     return { article, word: article.words[index], index };
 }
@@ -3385,7 +3400,7 @@ function openGlobalVocabularyWordEditor(key) {
     globalVocabularyEditRef = {
         articleId: source.article.id,
         wordId: source.word.id,
-        wordIndex: source.index
+        sourceIndex: source.index
     };
     editingId = source.word.id;
     switchModalType('word');
@@ -3405,10 +3420,7 @@ async function saveGlobalVocabularyWordFromModal() {
         return;
     }
     ensureArticleCollections(article);
-    let wordIndex = reference.wordIndex;
-    if (wordIndex < 0 || !article.words[wordIndex] || !globalIdsEqual(article.words[wordIndex].id, reference.wordId)) {
-        wordIndex = article.words.findIndex(word => globalIdsEqual(word.id, reference.wordId));
-    }
+    const wordIndex = resolveGlobalWordSourceIndex(article.words, reference.wordId, reference.sourceIndex);
     const oldWord = article.words[wordIndex];
     if (!oldWord) {
         closeModal();
