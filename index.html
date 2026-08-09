@@ -28,7 +28,14 @@
                 <div id="breadcrumbs" class="breadcrumbs"></div>
                 <div class="library-actions">
                     <button class="btn-sub" onclick="showGlobalVocabulary()">Vocabulary</button>
-                    <input type="text" id="global-search-input" placeholder="全データから検索..." oninput="performGlobalSearch()">
+                    <div class="library-search-control">
+                        <input type="text" id="global-search-input" placeholder="全データから検索..." oninput="performGlobalSearch()">
+                        <button type="button" id="global-search-clear-btn" onclick="clearGlobalSearch()" aria-label="検索をクリア">×</button>
+                    </div>
+                    <div class="library-search-options" aria-label="Library検索オプション">
+                        <label><input type="checkbox" id="global-search-whole-word" onchange="performGlobalSearch()"> 単語一致</label>
+                        <label><input type="checkbox" id="global-search-case-sensitive" onchange="performGlobalSearch()"> Aa</label>
+                    </div>
                     <button class="btn-sub" onclick="createNewFolder()">＋ フォルダ</button>
                     <button class="start-btn" onclick="showInputArea()">＋ 記事作成</button>
                     <button class="btn-sub" onclick="exportSmartReaderBackup()">バックアップ</button>

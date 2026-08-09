@@ -72,6 +72,7 @@ let importReviewSearchState = {
 };
 let currentTab = 'words', isAnkiMode = false, selectedText = "", editingId = null;
 let selectedReaderCapture = null;
+let readerSelectionSuppressUntil = 0;
 let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
@@ -90,6 +91,11 @@ let readerSearchState = {
     matches: [],
     results: []
 };
+let globalSearchState = {
+    query: '',
+    wholeWord: false,
+    caseSensitive: false
+};
 let globalVocabularyEditRef = null;
 let globalVocabularyState = {
     entries: [],
@@ -102,8 +108,13 @@ let globalVocabularyState = {
     grouped: false,
     ankiMode: false,
     ankiTarget: 'both',
-    expandedKey: null
+    expandedKey: null,
+    contextExpandedKeys: new Set(),
+    contextCollapsedKeys: new Set(),
+    contextRevealedMaskKeys: new Set(),
+    ankiRevealedKeys: new Set()
 };
+let readerScrollLockState = null;
 
 // --- 初期化関数 (1つに統合) ---
 async function init() {
@@ -174,6 +185,8 @@ document.addEventListener('selectionchange', () => {
     const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
     if (display && range && display.contains(range.commonAncestorContainer)) {
         selectedReaderCapture = captureReaderSelection(range, text);
+        // 長押し選択直後に発生する合成clickを、単語ジャンプとして扱わない。
+        readerSelectionSuppressUntil = Date.now() + 700;
     } else {
         selectedReaderCapture = null;
     }
@@ -1267,123 +1280,207 @@ async function saveNewArticle() {
     openArticle(editingId);
 }
 
-// --- 検索システム (スニペット表示) ---
-// --- 検索システム (スニペット表示・ジャンプ機能付き) ---
-function performGlobalSearch() { 
-    const inputQ = document.getElementById('global-search-input').value;
-    const q = inputQ.toLowerCase(); 
-    const l = document.getElementById('library-list'); 
-    l.innerHTML = ''; 
-    
-    if (!q) { showLibrary(); return; }
-
-    // ★追加: HTMLタグを無害化する関数
-    const escapeHtml = (str) => {
-        if(!str) return '';
-        return str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+// --- 検索システム (Library全体検索) ---
+function readGlobalSearchState() {
+    const input = document.getElementById('global-search-input');
+    const wholeWord = document.getElementById('global-search-whole-word');
+    const caseSensitive = document.getElementById('global-search-case-sensitive');
+    globalSearchState = {
+        query: String(input?.value || '').trim(),
+        wholeWord: !!wholeWord?.checked,
+        caseSensitive: !!caseSensitive?.checked
     };
-
-    const results = libraryItems.filter(item => {
-        if (item.type === 'folder') return item.name.toLowerCase().includes(q);
-        const hitTitle = item.name.toLowerCase().includes(q);
-        const searchableContent = getArticleSearchableText(item);
-        const hitContent = searchableContent.toLowerCase().includes(q);
-        const hitWords = item.words?.some(w => (w.word + w.meaning + (w.memo||"")).toLowerCase().includes(q));
-        const hitNotes = item.notes?.some(n => (n.originalText + n.translation + (n.extra||"")).toLowerCase().includes(q));
-        return hitTitle || hitContent || hitWords || hitNotes;
-    });
-
-    results.forEach(item => { 
-        const card = document.createElement('div'); 
-        card.className = `item-card ${item.type === 'folder' ? 'folder-icon' : 'article-icon'}`; 
-        card.onclick = () => item.type === 'folder' ? goToFolder(item.id) : openArticle(item.id); 
-        
-        let snippetHtml = "";
-        
-        // ★修正: エスケープしてからハイライトタグを付与する
-        const highlight = (t) => {
-            const escaped = escapeHtml(t);
-            // エスケープ後の文字列に対して、検索語(q)をハイライトタグで囲む
-            // ※検索語自体もエスケープが必要な文字を含まない前提の簡易実装
-            return escaped.replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'), '<span class="search-highlight">$1</span>');
-        };
-
-        if(item.type === 'article') {
-            const searchableContent = getArticleSearchableText(item);
-            // 1. タイトルヒット
-            if(item.name.toLowerCase().includes(q)) {
-                snippetHtml += `
-                    <div class="match-row" onclick="event.stopPropagation(); openArticle(${item.id})">
-                        <span class="match-tag title-tag">タイトル</span>
-                        <div class="match-text">${highlight(item.name)}</div>
-                    </div>`;
-            }
-            // 2. 本文ヒット
-            if(searchableContent && searchableContent.toLowerCase().includes(q)) {
-                const idx = searchableContent.toLowerCase().indexOf(q);
-                const start = Math.max(0, idx - 15);
-                // ★修正: 切り出したテキストを highlight 関数に通す（中でエスケープされる）
-                const rawText = searchableContent.substring(start, idx + q.length + 20);
-                
-                // ★修正: クリック時に openArticleAndSearch を呼び出すように変更
-                // inputQ (元の検索語) を渡す
-                snippetHtml += `
-                    <div class="match-row" onclick="event.stopPropagation(); openArticleAndSearch(${item.id}, '${inputQ.replace(/'/g, "\\'")}')">
-                        <span class="match-tag content-tag">本文</span>
-                        <div class="match-text">${highlight(rawText)}...</div>
-                    </div>`;
-            }
-            // 3. 単語ヒット
-            item.words?.forEach(w => {
-                if ((w.word + w.meaning + (w.memo||"")).toLowerCase().includes(q)) {
-                    snippetHtml += `
-                        <div class="match-row" onclick="event.stopPropagation(); openArticleAndJump(${item.id}, ${w.id}, 'word')">
-                            <span class="match-tag word-tag">単語</span>
-                            <div class="match-text">${highlight(w.word)}: ${highlight(w.meaning)}</div>
-                        </div>`;
-                }
-            });
-            // 4. ノートヒット
-            item.notes?.forEach(n => {
-                if ((n.originalText + n.translation + (n.extra||"")).toLowerCase().includes(q)) {
-                    snippetHtml += `
-                        <div class="match-row" onclick="event.stopPropagation(); openArticleAndJump(${item.id}, ${n.id}, 'note')">
-                            <span class="match-tag note-tag">ノート</span>
-                            <div class="match-text">${highlight(n.originalText)}</div>
-                        </div>`;
-                }
-            });
-        }
-        
-        card.innerHTML = `
-            <h3>${item.name || "無題"}</h3>
-            <div class="search-snippets">${snippetHtml}</div>
-            <div class="card-actions">
-                <button class="small-btn move" onclick="event.stopPropagation(); openMoveModal(${item.id})">移動</button>
-                <button class="small-btn del" onclick="event.stopPropagation(); deleteLibraryItem(${item.id})">削除</button>
-            </div>`; 
-        l.appendChild(card); 
-    }); 
+    return { ...globalSearchState };
 }
 
-// ★追加: 本文ヒット時に記事を開いてハイライト検索を実行する関数
-function openArticleAndSearch(articleId, query) {
-    openArticle(articleId);
-    
-    // 記事が開いた直後に検索を実行
-    setTimeout(() => {
-        const searchInput = document.getElementById('reader-search-input');
-        if(searchInput) {
-            searchInput.value = query; // 検索ボックスに値を入れる
-            searchInText();            // 本文内検索を実行（これで黄色くなります）
+function getGlobalSearchMatches(value, options) {
+    return findSearchMatches(
+        String(value ?? ''),
+        String(options?.query || ''),
+        !!options?.wholeWord,
+        !!options?.caseSensitive
+    );
+}
+
+function highlightSearchHtml(value, options, className = 'search-highlight') {
+    const text = String(value ?? '');
+    const matches = getGlobalSearchMatches(text, options);
+    if (!matches.length) return escapeHtml(text);
+
+    let html = '';
+    let cursor = 0;
+    matches.forEach(match => {
+        html += escapeHtml(text.slice(cursor, match.index));
+        html += `<span class="${className}">${escapeHtml(text.slice(match.index, match.index + match.length))}</span>`;
+        cursor = match.index + match.length;
+    });
+    return html + escapeHtml(text.slice(cursor));
+}
+
+function getGlobalSearchMatchInfo(item, options) {
+    if (!item) return null;
+    const titleMatches = getGlobalSearchMatches(item.name, options);
+    if (item.type === 'folder') return { titleMatches };
+
+    const searchableContent = getArticleSearchableText(item);
+    const contentMatches = getGlobalSearchMatches(searchableContent, options);
+    const wordMatches = (Array.isArray(item.words) ? item.words : []).filter(word => [
+        word?.word,
+        word?.meaning,
+        word?.memo
+    ].some(value => getGlobalSearchMatches(value, options).length > 0));
+    const noteMatches = (Array.isArray(item.notes) ? item.notes : []).filter(note => [
+        note?.originalText,
+        note?.translation,
+        note?.extra
+    ].some(value => getGlobalSearchMatches(value, options).length > 0));
+    return { titleMatches, contentMatches, wordMatches, noteMatches, searchableContent };
+}
+
+function clearGlobalSearch() {
+    const input = document.getElementById('global-search-input');
+    if (!input) return;
+    input.value = '';
+    performGlobalSearch();
+    input.focus();
+}
+
+function performGlobalSearch() {
+    const options = readGlobalSearchState();
+    const list = document.getElementById('library-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (!options.query) {
+        showLibrary();
+        return;
+    }
+
+    const results = libraryItems.filter(item => {
+        const info = getGlobalSearchMatchInfo(item, options);
+        return !!info && (
+            info.titleMatches.length > 0 ||
+            info.contentMatches?.length > 0 ||
+            info.wordMatches?.length > 0 ||
+            info.noteMatches?.length > 0
+        );
+    });
+
+    results.forEach(item => {
+        const info = getGlobalSearchMatchInfo(item, options);
+        const card = document.createElement('div');
+        card.className = `item-card ${item.type === 'folder' ? 'folder-icon' : 'article-icon'}`;
+        card.onclick = () => item.type === 'folder'
+            ? goToFolder(item.id)
+            : openArticleFromGlobalSearch(item.id, options);
+
+        const title = document.createElement('h3');
+        title.textContent = item.name || '無題';
+        card.appendChild(title);
+
+        if (item.type === 'article') {
+            const snippets = document.createElement('div');
+            snippets.className = 'search-snippets';
+
+            const addMatchRow = (tag, tagClass, text, handler) => {
+                const row = document.createElement('div');
+                row.className = 'match-row';
+                row.addEventListener('click', event => {
+                    event.stopPropagation();
+                    handler();
+                });
+                const tagElement = document.createElement('span');
+                tagElement.className = `match-tag ${tagClass}`;
+                tagElement.textContent = tag;
+                const textElement = document.createElement('div');
+                textElement.className = 'match-text';
+                textElement.innerHTML = highlightSearchHtml(text, options);
+                row.append(tagElement, textElement);
+                snippets.appendChild(row);
+            };
+
+            if (info.titleMatches.length > 0) {
+                addMatchRow('タイトル', 'title-tag', item.name, () => openArticleFromGlobalSearch(item.id, options));
+            }
+
+            if (info.contentMatches.length > 0) {
+                const firstMatch = info.contentMatches[0];
+                const start = Math.max(0, firstMatch.index - 15);
+                const rawText = info.searchableContent.slice(start, firstMatch.index + firstMatch.length + 20);
+                addMatchRow('本文', 'content-tag', `${start > 0 ? '…' : ''}${rawText}…`, () => openArticleAndSearch(item.id, options.query, options));
+            }
+
+            info.wordMatches.forEach(word => {
+                addMatchRow('単語', 'word-tag', `${word?.word || ''}: ${word?.meaning || ''}`, () => openArticleAndJump(item.id, word?.id, 'word'));
+            });
+
+            info.noteMatches.forEach(note => {
+                addMatchRow('ノート', 'note-tag', note?.originalText || note?.translation || '', () => openArticleAndJump(item.id, note?.id, 'note'));
+            });
+            card.appendChild(snippets);
         }
-    }, 100);
+
+        const actions = document.createElement('div');
+        actions.className = 'card-actions';
+        const moveButton = document.createElement('button');
+        moveButton.className = 'small-btn move';
+        moveButton.textContent = '移動';
+        moveButton.addEventListener('click', event => {
+            event.stopPropagation();
+            openMoveModal(item.id);
+        });
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'small-btn del';
+        deleteButton.textContent = '削除';
+        deleteButton.addEventListener('click', event => {
+            event.stopPropagation();
+            deleteLibraryItem(item.id);
+        });
+        actions.append(moveButton, deleteButton);
+        card.appendChild(actions);
+        list.appendChild(card);
+    });
+}
+
+function applyLibrarySearchToReader(options, shouldJump = true) {
+    const searchInput = document.getElementById('reader-search-input');
+    if (!searchInput) return;
+
+    const query = String(options?.query || '').trim();
+    const wholeWord = !!options?.wholeWord;
+    const caseSensitive = !!options?.caseSensitive;
+    const scope = document.getElementById('reader-search-scope');
+    const useBookScope = hasStoredChapters(currentArticle) && getCurrentChapters().length > 1;
+    readerSearchState.scope = useBookScope ? 'book' : 'chapter';
+    if (scope) scope.value = readerSearchState.scope;
+    searchInput.value = query;
+    const wholeWordInput = document.getElementById('search-whole-word');
+    const caseSensitiveInput = document.getElementById('search-case-sensitive');
+    if (wholeWordInput) wholeWordInput.checked = wholeWord;
+    if (caseSensitiveInput) caseSensitiveInput.checked = caseSensitive;
+
+    searchInText();
+    const total = isBookWideSearchActive() ? readerSearchState.results.length : readerSearchState.matches.length;
+    if (shouldJump && total > 0) setActiveSearchResult(0, true);
+}
+
+function openArticleFromGlobalSearch(articleId, options = globalSearchState) {
+    openArticle(articleId);
+    setTimeout(() => applyLibrarySearchToReader(options, true), 100);
+}
+
+function openArticleAndSearch(articleId, query, options = {}) {
+    openArticle(articleId);
+    setTimeout(() => applyLibrarySearchToReader({
+        query,
+        wholeWord: !!options.wholeWord,
+        caseSensitive: !!options.caseSensitive
+    }, true), 100);
 }
 
 // 検索結果から単語・ノートへ直接ジャンプする関数
 function openArticleAndJump(articleId, itemId, type) {
     openArticle(articleId);
-    // サイドパネルが開くのを少し待ってからジャンプ
     setTimeout(() => {
         jumpToResult(itemId, type);
     }, 100);
@@ -1631,7 +1728,16 @@ function renderArticleText() {
     updateProgress(null, true);
 }
 
+function hasActiveReaderTextSelection() {
+    const selection = window.getSelection?.();
+    const display = document.getElementById('text-display');
+    if (!selection || selection.isCollapsed || !selection.toString().trim() || !display || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    return display.contains(range.commonAncestorContainer);
+}
+
 function handleReaderClick(e) {
+    if (hasActiveReaderTextSelection() || Date.now() < readerSelectionSuppressUntil) return;
     const target = e.target.closest ? e.target.closest('[data-jump-id]') : e.target;
     if (target && target.dataset && target.dataset.jumpId) {
         jumpToResult(parseInt(target.dataset.jumpId), target.dataset.type);
@@ -1876,7 +1982,7 @@ function editItem(id, type, sourceIndex = null) {
         document.getElementById('input-note-trans').value = item.translation;
         document.getElementById('input-note-extra').value = item.extra || '';
     }
-    document.getElementById('unified-modal-overlay').classList.add('show');
+    showUnifiedModal();
 }
 
 // --- ＋ボタンを押した時にモーダルを新規状態で開く ---
@@ -1902,7 +2008,7 @@ function openUnifiedModal() {
     switchModalType('word');
 
     // モーダルを表示
-    document.getElementById('unified-modal-overlay').classList.add('show');
+    showUnifiedModal();
 }
 
 
@@ -2143,8 +2249,30 @@ function flushReadingPositionSave() {
 
 async function saveToDB() { await db.setItem('library_items', libraryItems); }
 function hideAllSections() { ['library-section', 'vocabulary-section', 'input-area', 'import-review-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
+function lockReaderScrollForModal() {
+    const display = document.getElementById('text-display');
+    if (!display || !currentArticle || readerScrollLockState) return;
+    readerScrollLockState = { element: display, scrollTop: display.scrollTop };
+    display.classList.add('is-scroll-locked');
+    display.scrollTop = readerScrollLockState.scrollTop;
+}
+
+function unlockReaderScrollForModal() {
+    const state = readerScrollLockState;
+    readerScrollLockState = null;
+    if (!state?.element) return;
+    state.element.classList.remove('is-scroll-locked');
+    state.element.scrollTop = state.scrollTop;
+}
+
+function showUnifiedModal() {
+    lockReaderScrollForModal();
+    document.getElementById('unified-modal-overlay')?.classList.add('show');
+}
+
 function closeModal() {
     document.getElementById('unified-modal-overlay').classList.remove('show');
+    unlockReaderScrollForModal();
     editingId = null;
     editingSourceIndex = null;
     globalVocabularyEditRef = null;
@@ -3018,6 +3146,7 @@ function collectGlobalVocabulary() {
                     meaning: String(word?.meaning || ''),
                     memo: String(word?.memo || ''),
                     context: word?.context,
+                    contextMeaning: word?.contextMeaning,
                     memorized: !!word?.memorized,
                     createdAt: word?.createdAt,
                     sequence: sequence++
@@ -3219,15 +3348,165 @@ function formatGlobalVocabularyDate(value) {
     return timestamp > 0 ? new Date(timestamp).toLocaleDateString('ja-JP') : '';
 }
 
-function createGlobalVocabularyCard(entry) {
+function globalVocabularySelectionIntersects(element) {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.toString().trim() || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    if (element.contains(range.commonAncestorContainer)) return true;
+    try {
+        return range.intersectsNode(element);
+    } catch (_error) {
+        return false;
+    }
+}
+
+function setGlobalVocabularyContextMaskState(mask, answer, placeholder, revealed) {
+    mask.classList.toggle('global-vocabulary-context-mask', !revealed);
+    mask.classList.toggle('global-vocabulary-context-answer', revealed);
+    mask.textContent = revealed ? answer : placeholder;
+    mask.setAttribute('aria-label', revealed ? '単語を隠す' : '伏字を表示');
+    mask.setAttribute('aria-pressed', String(revealed));
+}
+
+function appendGlobalVocabularyContextText(container, context, word, { interactive = false, entryKey = '' } = {}) {
+    const text = String(context ?? '');
+    const phrase = String(word ?? '').trim();
+    if (!text) return;
+    const matches = phrase
+        ? getGlobalSearchMatches(text, { query: phrase, wholeWord: false, caseSensitive: false })
+        : [];
+    if (!phrase || !matches.length) {
+        container.textContent = text;
+        return;
+    }
+    let cursor = 0;
+    matches.forEach((match, occurrenceIndex) => {
+        if (match.index > cursor) container.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+        if (interactive) {
+            const answer = text.slice(match.index, match.index + match.length);
+            const placeholder = '＿'.repeat(Math.max(4, Math.min(20, Array.from(answer).length)));
+            const maskKey = `${entryKey}::${occurrenceIndex}`;
+            const isRevealed = globalVocabularyState.contextRevealedMaskKeys.has(maskKey);
+            const mask = document.createElement('span');
+            mask.setAttribute('role', 'button');
+            mask.setAttribute('tabindex', '0');
+            mask.dataset.contextMaskKey = maskKey;
+            setGlobalVocabularyContextMaskState(mask, answer, placeholder, isRevealed);
+
+            const toggleMask = () => {
+                const shouldReveal = !globalVocabularyState.contextRevealedMaskKeys.has(maskKey);
+                if (shouldReveal) globalVocabularyState.contextRevealedMaskKeys.add(maskKey);
+                else globalVocabularyState.contextRevealedMaskKeys.delete(maskKey);
+                setGlobalVocabularyContextMaskState(mask, answer, placeholder, shouldReveal);
+            };
+            mask.addEventListener('click', event => {
+                event.stopPropagation();
+                if (globalVocabularySelectionIntersects(mask)) return;
+                toggleMask();
+            });
+            mask.addEventListener('keydown', event => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                event.stopPropagation();
+                toggleMask();
+            });
+            container.appendChild(mask);
+        } else {
+            const highlight = document.createElement('mark');
+            highlight.className = 'global-vocabulary-context-highlight';
+            highlight.textContent = text.slice(match.index, match.index + match.length);
+            container.appendChild(highlight);
+        }
+        cursor = match.index + match.length;
+    });
+    if (cursor < text.length) container.appendChild(document.createTextNode(text.slice(cursor)));
+}
+
+function appendGlobalVocabularyContext(container, entry) {
+    const context = String(entry?.context ?? '');
+    if (!context.trim()) return false;
+
+    const key = String(entry.key);
+    const isAnkiModeActive = !!globalVocabularyState.ankiMode;
+    const isOpen = isAnkiModeActive
+        ? globalVocabularyState.contextExpandedKeys.has(key)
+        : !globalVocabularyState.contextCollapsedKeys.has(key);
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'global-vocabulary-context';
+    wrapper.addEventListener('click', event => event.stopPropagation());
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'global-vocabulary-context-toggle';
+    toggle.textContent = isOpen ? '例文を隠す' : '例文';
+    toggle.setAttribute('aria-expanded', String(isOpen));
+    toggle.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isAnkiModeActive) {
+            if (isOpen) globalVocabularyState.contextExpandedKeys.delete(key);
+            else globalVocabularyState.contextExpandedKeys.add(key);
+        } else if (isOpen) {
+            globalVocabularyState.contextCollapsedKeys.add(key);
+        } else {
+            globalVocabularyState.contextCollapsedKeys.delete(key);
+        }
+        renderGlobalVocabulary();
+    });
+    wrapper.appendChild(toggle);
+
+    if (isOpen) {
+        const panel = document.createElement('div');
+        panel.className = 'global-vocabulary-context-panel';
+        appendGlobalVocabularyContextText(panel, context, entry.wordText, {
+            interactive: isAnkiModeActive,
+            entryKey: key
+        });
+
+        if (entry.contextMeaning) {
+            const contextMeaning = document.createElement('div');
+            contextMeaning.className = 'global-vocabulary-context-meaning';
+            contextMeaning.textContent = `Context meaning: ${String(entry.contextMeaning)}`;
+            panel.appendChild(contextMeaning);
+        }
+
+        if (isAnkiModeActive) {
+            const openButton = document.createElement('button');
+            openButton.type = 'button';
+            openButton.className = 'small-btn global-vocabulary-context-open';
+            openButton.textContent = '本文で開く';
+            openButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                openGlobalVocabularyEntry(entry.key);
+            });
+            panel.appendChild(openButton);
+        }
+        wrapper.appendChild(panel);
+    }
+    container.appendChild(wrapper);
+    return true;
+}
+
+function createGlobalVocabularyCard(entry, { forceExpanded = false } = {}) {
     const card = document.createElement('article');
     card.className = 'note-card compact-card global-vocabulary-card' + (entry.memorized ? ' memorized-item' : '');
+    const entryKey = String(entry.key);
+    if (globalVocabularyState.ankiRevealedKeys.has(entryKey)) card.classList.add('revealed');
     card.addEventListener('click', event => {
         if (event.target.closest('button, input, select, a')) return;
         if (globalVocabularyState.ankiMode) {
-            card.classList.toggle('revealed');
+            if (globalVocabularyState.ankiRevealedKeys.has(entryKey)) {
+                globalVocabularyState.ankiRevealedKeys.delete(entryKey);
+                card.classList.remove('revealed');
+            } else {
+                globalVocabularyState.ankiRevealedKeys.add(entryKey);
+                card.classList.add('revealed');
+            }
             return;
         }
+        if (forceExpanded) return;
         globalVocabularyState.expandedKey = globalVocabularyState.expandedKey === entry.key ? null : entry.key;
         renderGlobalVocabulary();
     });
@@ -3259,13 +3538,15 @@ function createGlobalVocabularyCard(entry) {
     summary.append(left, meaning);
     card.appendChild(summary);
 
-    if (!globalVocabularyState.ankiMode && globalVocabularyState.expandedKey === entry.key) {
+    const isExpanded = !globalVocabularyState.ankiMode && (forceExpanded || globalVocabularyState.expandedKey === entry.key);
+    if (isExpanded) {
         const details = document.createElement('div');
         details.className = 'global-vocabulary-details';
         addGlobalVocabularyDetail(details, '出典', entry.articleTitle);
         if (entry.chapterTitle) addGlobalVocabularyDetail(details, '章', entry.chapterTitle);
         if (entry.memo) addGlobalVocabularyDetail(details, 'Memo', entry.memo);
-        if (entry.context) addGlobalVocabularyDetail(details, 'Context', entry.context);
+        if (entry.contextMeaning) addGlobalVocabularyDetail(details, 'Context訳', entry.contextMeaning);
+        appendGlobalVocabularyContext(details, entry);
         if (entry.createdAt) addGlobalVocabularyDetail(details, '登録日', formatGlobalVocabularyDate(entry.createdAt));
 
         const actions = document.createElement('div');
@@ -3294,6 +3575,8 @@ function createGlobalVocabularyCard(entry) {
         actions.append(editButton, deleteButton, openButton);
         details.appendChild(actions);
         card.appendChild(details);
+    } else if (globalVocabularyState.ankiMode) {
+        appendGlobalVocabularyContext(card, entry);
     }
 
     return card;
@@ -3336,7 +3619,7 @@ function createGlobalVocabularyGroupCard(group) {
     card.appendChild(actions);
     const entries = document.createElement('div');
     entries.className = 'global-vocabulary-group-entries';
-    group.entries.forEach(entry => entries.appendChild(createGlobalVocabularyCard(entry)));
+    group.entries.forEach(entry => entries.appendChild(createGlobalVocabularyCard(entry, { forceExpanded: true })));
     card.appendChild(entries);
     return card;
 }
@@ -3371,7 +3654,7 @@ function renderGlobalVocabulary() {
         container.appendChild(empty);
         return;
     }
-    if (globalVocabularyState.grouped && !globalVocabularyState.ankiMode) {
+    if (globalVocabularyState.grouped) {
         groupGlobalVocabularyEntries(entries).forEach(group => container.appendChild(createGlobalVocabularyGroupCard(group)));
     } else {
         entries.forEach(entry => container.appendChild(createGlobalVocabularyCard(entry)));
@@ -3458,7 +3741,7 @@ function openGlobalVocabularyWordEditor(key) {
     document.getElementById('input-word-meaning').value = source.word.meaning || '';
     document.getElementById('input-word-memo').value = source.word.memo || '';
     document.getElementById('input-word-context').value = source.word.context || '';
-    document.getElementById('unified-modal-overlay').classList.add('show');
+    showUnifiedModal();
 }
 
 async function saveGlobalVocabularyWordFromModal() {
