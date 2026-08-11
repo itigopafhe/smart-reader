@@ -77,6 +77,7 @@ let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
 let editingSourceIndex = null;
+let questionReviewState = { id: null, answer: false, explanation: false, memo: false };
 let readingPositionSaveTimer = null;
 let suppressReadingPositionSave = false;
 let readingPositionRestoreToken = 0;
@@ -498,6 +499,7 @@ function getSavedChapterReferenceCounts(article, chapterIds) {
     const words = countItems(article?.words);
     const notes = countItems(article?.notes);
     const bookmarks = countItems(article?.bookmarks);
+    const questions = countItems(article?.questions);
     let readingPositions = 0;
     if (article?.readingPosition?.chapterId !== undefined && ids.has(String(article.readingPosition.chapterId))) {
         readingPositions += 1;
@@ -510,7 +512,8 @@ function getSavedChapterReferenceCounts(article, chapterIds) {
         words: words.protected,
         notes: notes.protected,
         bookmarks: bookmarks.protected,
-        unscoped: words.unscoped + notes.unscoped + bookmarks.unscoped,
+        questions: questions.protected,
+        unscoped: words.unscoped + notes.unscoped + bookmarks.unscoped + questions.unscoped,
         readingPositions
     };
 }
@@ -524,7 +527,7 @@ function ensureSavedChapterStructureEditAllowed(chapterIndexes, operation) {
     if (!article || chapters.length === 0) return false;
 
     const counts = getSavedChapterReferenceCounts(article, chapters.map(chapter => chapter.id));
-    const protectedDataCount = counts.words + counts.notes + counts.bookmarks;
+    const protectedDataCount = counts.words + counts.notes + counts.bookmarks + counts.questions;
     if (protectedDataCount === 0) return true;
 
     const message = [
@@ -1194,7 +1197,48 @@ function showLibrary() {
 
 function goToFolder(id) { currentFolderId = id; showLibrary(); }
 
-// --- 記事の作成・編集保存 (★重要: 反応しなかった部分を修復) ---
+function createManualChapterId(article) {
+    const base = `chapter-${article?.id ?? 'article'}-main`;
+    const existing = new Set(Array.isArray(article?.chapters) ? article.chapters.map(chapter => String(chapter?.id ?? '')) : []);
+    if (!existing.has(base)) return base;
+    let index = 2;
+    while (existing.has(`${base}-${index}`)) index += 1;
+    return `${base}-${index}`;
+}
+
+function convertArticleToChapterMode(article, content = article?.content || '') {
+    if (!article || article.type !== 'article' || hasStoredChapters(article)) return false;
+    const chapterId = createManualChapterId(article);
+    const fullText = String(content ?? '');
+    article.content = fullText;
+    article.chapters = [{ id: chapterId, title: '本文', content: fullText, order: 0 }];
+    ensureArticleCollections(article);
+    ['words', 'notes', 'bookmarks', 'questions'].forEach(type => {
+        if (!Array.isArray(article[type])) return;
+        article[type] = article[type].map(item => {
+            if (!item || (item.chapterId !== undefined && item.chapterId !== null && item.chapterId !== '')) return item;
+            return { ...item, chapterId };
+        });
+    });
+    if (article.readingPosition && (article.readingPosition.chapterId === undefined || article.readingPosition.chapterId === null || article.readingPosition.chapterId === 'legacy-main')) {
+        article.readingPosition = { ...article.readingPosition, chapterId };
+    }
+    if (article.readingPositions && typeof article.readingPositions === 'object' && article.readingPositions['legacy-main']) {
+        if (!article.readingPositions[chapterId]) article.readingPositions[chapterId] = { ...article.readingPositions['legacy-main'], chapterId };
+        delete article.readingPositions['legacy-main'];
+    }
+    return chapterId;
+}
+
+async function convertCurrentArticleToChapterMode() {
+    if (!currentArticle || hasStoredChapters(currentArticle)) return;
+    if (typeof window.confirm === 'function' && !window.confirm('この記事を章モードに変換します。本文全体を最初の1章として作成し、既存の単語・ノート・しおり・問題は保持します。')) return;
+    const chapterId = convertArticleToChapterMode(currentArticle, currentArticle.content);
+    if (!chapterId) return;
+    await saveToDB();
+    openSavedBookEditor(currentArticle);
+}
+
 function showInputArea() {
     flushReadingPositionSave();
     hideAllSections();
@@ -1209,6 +1253,8 @@ function showInputArea() {
     document.getElementById('text-url').value = ""; 
     document.getElementById('text-input').value = "";
     document.getElementById('text-input').readOnly = false;
+    document.getElementById('manual-chapter-mode').checked = false;
+    document.getElementById('convert-to-chapter-btn').style.display = 'none';
     document.getElementById('input-area').style.display = 'block';
     document.getElementById('file-input').value = ""; 
     setFileImportStatus('');
@@ -1230,6 +1276,8 @@ function editCurrentArticle() {
         ? currentArticle.content
         : getArticleFullText(currentArticle);
     document.getElementById('text-input').readOnly = false;
+    document.getElementById('manual-chapter-mode').checked = false;
+    document.getElementById('convert-to-chapter-btn').style.display = 'inline-block';
     document.getElementById('input-area').style.display = 'block'; 
 }
 
@@ -1238,6 +1286,7 @@ async function saveNewArticle() {
     const content = document.getElementById('text-input').value;
     const url = document.getElementById('text-url').value;
     const imported = pendingImportedDocument;
+    const chapterMode = !!document.getElementById('manual-chapter-mode')?.checked && !imported;
     const importedContent = getImportedDocumentText(imported);
     if (!imported && !content) return alert("本文を入力してください");
 
@@ -1251,6 +1300,7 @@ async function saveNewArticle() {
             art.name = name;
             art.content = imported ? importedContent : content;
             art.url = url;
+            if (chapterMode && !hasStoredChapters(art)) convertArticleToChapterMode(art, content);
             if (imported) {
                 art.chapters = imported.chapters;
                 art.sourceType = imported.sourceType;
@@ -1265,8 +1315,12 @@ async function saveNewArticle() {
             parentId: currentFolderId,
             content: imported ? importedContent : content,
             url,
-            words: [], notes: [], bookmarks: [] 
+            words: [], notes: [], bookmarks: [], questions: []
         };
+        if (chapterMode) {
+            const chapterId = `chapter-${newArt.id}-main`;
+            newArt.chapters = [{ id: chapterId, title: '本文', content, order: 0 }];
+        }
         if (imported) {
             newArt.chapters = imported.chapters;
             newArt.sourceType = imported.sourceType;
@@ -1697,15 +1751,52 @@ function openArticle(id) {
     restoreReadingPosition(getSavedPositionForChapter(currentArticle, currentChapterId));
 }
 
+function getQuestionMarkerEntries(paragraphs, chapterId) {
+    const questions = Array.isArray(currentArticle?.questions) ? currentArticle.questions : [];
+    const byParagraph = new Map();
+    questions.forEach((question, questionIndex) => {
+        if (!question) return;
+        if (question.chapterId !== undefined && question.chapterId !== null && String(question.chapterId) !== String(chapterId)) return;
+        if (hasStoredChapters(currentArticle) && (question.chapterId === undefined || question.chapterId === null || question.chapterId === '') && String(chapterId) !== String(getArticleChapters(currentArticle)[0]?.id)) return;
+        const selected = String(question.selectedText || question.anchor?.selectedText || '');
+        if (!selected) return;
+        const anchor = question.anchor || {};
+        const paragraphIndex = Number.isInteger(anchor.paragraphIndex) ? anchor.paragraphIndex : -1;
+        const paragraph = paragraphIndex >= 0 ? paragraphs[paragraphIndex] : null;
+        let start = paragraph ? Number(anchor.textOffset) : -1;
+        if (!paragraph || start < 0 || paragraph.slice(start, start + selected.length) !== selected) {
+            const normalizedSelected = selected.toLocaleLowerCase();
+            const fallbackIndex = paragraphs.findIndex(value => value.toLocaleLowerCase().includes(normalizedSelected));
+            if (fallbackIndex < 0) return;
+            start = paragraphs[fallbackIndex].toLocaleLowerCase().indexOf(normalizedSelected);
+            const matchedSelected = paragraphs[fallbackIndex].slice(start, start + selected.length);
+            byParagraph.set(fallbackIndex, [...(byParagraph.get(fallbackIndex) || []), { question, questionIndex, start, selected: matchedSelected }]);
+            return;
+        }
+        byParagraph.set(paragraphIndex, [...(byParagraph.get(paragraphIndex) || []), { question, questionIndex, start, selected }]);
+    });
+    return byParagraph;
+}
+
 function renderArticleText() {
     if(!currentArticle) return;
     ensureArticleCollections(currentArticle);
     const display = document.getElementById('text-display');
     const content = getCurrentChapterContent();
     const currentChapterIdForHighlight = getCurrentChapterId();
-    let html = getReaderParagraphs(content)
-        .map((paragraph, index) => `<p data-paragraph-index="${index}">${escapeHtml(paragraph)}</p>`)
-        .join('');
+    const paragraphs = getReaderParagraphs(content);
+    const questionMarkers = getQuestionMarkerEntries(paragraphs, currentChapterIdForHighlight);
+    const questionTokens = [];
+    let html = paragraphs.map((paragraph, index) => {
+        let source = paragraph;
+        const entries = (questionMarkers.get(index) || []).sort((left, right) => right.start - left.start);
+        entries.forEach(entry => {
+            const token = `__SMART_READER_QUESTION_${questionTokens.length}__`;
+            questionTokens.push({ token, question: entry.question, selected: entry.selected });
+            source = source.slice(0, entry.start) + token + source.slice(entry.start + entry.selected.length);
+        });
+        return `<p data-paragraph-index="${index}">${escapeHtml(source)}</p>`;
+    }).join('');
     
     // ハイライト置換 (ノート > 単語 の順で処理)
     const sn = [...currentArticle.notes].sort((a,b) => String(b.originalText || '').length - String(a.originalText || '').length);
@@ -1724,6 +1815,11 @@ function renderArticleText() {
         html = html.replace(new RegExp(`(?<!>)${escaped}(?!<)`, 'gi'), `<span class="word-highlight" data-jump-id="${w.id}" data-type="word">$&</span>`);
     });
 
+    questionTokens.forEach(({ token, question, selected }) => {
+        const marker = `<span class="question-marker" role="button" tabindex="0" aria-label="問題を開く" data-question-id="${escapeHtml(String(question.id))}" data-type="question">${escapeHtml(selected)}</span>`;
+        html = html.split(token).join(marker);
+    });
+
     display.innerHTML = html;
     updateProgress(null, true);
 }
@@ -1739,9 +1835,109 @@ function hasActiveReaderTextSelection() {
 function handleReaderClick(e) {
     if (hasActiveReaderTextSelection() || Date.now() < readerSelectionSuppressUntil) return;
     const target = e.target.closest ? e.target.closest('[data-jump-id]') : e.target;
+    const questionTarget = e.target.closest ? e.target.closest('[data-type="question"]') : null;
+    if (questionTarget?.dataset?.questionId) {
+        openQuestionReview(questionTarget.dataset.questionId);
+        return;
+    }
     if (target && target.dataset && target.dataset.jumpId) {
         jumpToResult(parseInt(target.dataset.jumpId), target.dataset.type);
     }
+}
+
+function handleReaderKeydown(event) {
+    if (event?.key !== 'Enter' && event?.key !== ' ') return;
+    const target = event.target?.closest ? event.target.closest('[data-type="question"]') : null;
+    if (!target?.dataset?.questionId || hasActiveReaderTextSelection()) return;
+    event.preventDefault();
+    openQuestionReview(target.dataset.questionId);
+}
+
+function getCurrentQuestion(id = questionReviewState.id) {
+    if (!currentArticle || !Array.isArray(currentArticle.questions)) return null;
+    return currentArticle.questions.find(question => question && String(question.id) === String(id)) || null;
+}
+
+function setQuestionReviewField(field, visible) {
+    const question = getCurrentQuestion();
+    if (!question) return;
+    questionReviewState[field] = !!visible;
+    const value = document.getElementById(`question-review-${field}`);
+    const toggle = document.getElementById(`question-${field}-toggle`);
+    if (value) {
+        value.hidden = !visible;
+        value.textContent = String(question[field] || '');
+    }
+    if (toggle) toggle.textContent = visible ? `${field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ'}を隠す` : `${field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ'}を見る`;
+}
+
+function toggleQuestionReviewField(field) {
+    setQuestionReviewField(field, !questionReviewState[field]);
+}
+
+function renderQuestionReview() {
+    const question = getCurrentQuestion();
+    if (!question) return;
+    document.getElementById('question-review-selected').textContent = String(question.selectedText || question.anchor?.selectedText || '');
+    document.getElementById('question-review-question').textContent = String(question.question || '');
+    ['answer', 'explanation', 'memo'].forEach(field => setQuestionReviewField(field, questionReviewState[field]));
+}
+
+function openQuestionReview(id) {
+    const question = getCurrentQuestion(id);
+    if (!question) return;
+    questionReviewState = { id: question.id, answer: false, explanation: false, memo: false };
+    document.getElementById('question-review-view').style.display = 'block';
+    document.getElementById('question-review-edit').style.display = 'none';
+    renderQuestionReview();
+    lockReaderScrollForModal();
+    document.getElementById('question-review-overlay').classList.add('show');
+}
+
+function closeQuestionReview() {
+    document.getElementById('question-review-overlay')?.classList.remove('show');
+    unlockReaderScrollForModal();
+    questionReviewState = { id: null, answer: false, explanation: false, memo: false };
+}
+
+function editQuestionReview() {
+    const question = getCurrentQuestion();
+    if (!question) return;
+    document.getElementById('question-edit-selected-text').value = String(question.selectedText || question.anchor?.selectedText || '');
+    document.getElementById('question-edit-question').value = String(question.question || '');
+    document.getElementById('question-edit-answer').value = String(question.answer || '');
+    document.getElementById('question-edit-explanation').value = String(question.explanation || '');
+    document.getElementById('question-edit-memo').value = String(question.memo || '');
+    document.getElementById('question-review-view').style.display = 'none';
+    document.getElementById('question-review-edit').style.display = 'block';
+}
+
+function cancelQuestionReviewEdit() {
+    document.getElementById('question-review-view').style.display = 'block';
+    document.getElementById('question-review-edit').style.display = 'none';
+}
+
+async function saveQuestionReviewEdit(event) {
+    event?.preventDefault();
+    const question = getCurrentQuestion();
+    if (!question) return;
+    question.question = document.getElementById('question-edit-question').value;
+    question.answer = document.getElementById('question-edit-answer').value;
+    question.explanation = document.getElementById('question-edit-explanation').value;
+    question.memo = document.getElementById('question-edit-memo').value;
+    await saveToDB();
+    closeQuestionReview();
+    rerenderReaderAtPosition(captureReadingPosition());
+}
+
+async function deleteQuestionReview() {
+    if (!currentArticle || !Array.isArray(currentArticle.questions)) return;
+    if (typeof window.confirm === 'function' && !window.confirm('この問題登録だけを削除しますか？本文は削除されません。')) return;
+    const id = questionReviewState.id;
+    currentArticle.questions = currentArticle.questions.filter(question => String(question?.id) !== String(id));
+    await saveToDB();
+    closeQuestionReview();
+    rerenderReaderAtPosition(captureReadingPosition());
 }
 
 function jumpToResult(id, type) {
@@ -1888,7 +2084,22 @@ async function handleUnifiedSave(e) {
     if (!currentArticle) return;
     const readingPosition = rememberReadingPosition();
     try {
-        if (currentModalType === 'word') {
+        if (currentModalType === 'question') {
+            const activeChapterId = getActiveChapterIdForItem();
+            const selected = document.getElementById('input-question-selected-text').value.trim();
+            const question = {
+                id: Date.now(),
+                selectedText: selected,
+                question: document.getElementById('input-question-question').value,
+                answer: document.getElementById('input-question-answer').value,
+                explanation: document.getElementById('input-question-explanation').value,
+                memo: document.getElementById('input-question-memo').value,
+                createdAt: Date.now()
+            };
+            if (activeChapterId) question.chapterId = activeChapterId;
+            if (selectedReaderCapture?.anchor && selected === selectedReaderCapture.anchor.selectedText) question.anchor = selectedReaderCapture.anchor;
+            currentArticle.questions.push(question);
+        } else if (currentModalType === 'word') {
             const activeChapterId = getActiveChapterIdForItem();
             const values = {
                 word: document.getElementById('input-word-text').value,
@@ -1946,11 +2157,14 @@ async function handleUnifiedSave(e) {
 function switchModalType(type) {
     currentModalType = type;
     const isW = (type === 'word');
+    const isN = (type === 'note');
     document.getElementById('form-word-section').style.display = isW ? 'block' : 'none';
-    document.getElementById('form-note-section').style.display = isW ? 'none' : 'block';
+    document.getElementById('form-note-section').style.display = isN ? 'block' : 'none';
+    document.getElementById('form-question-section').style.display = type === 'question' ? 'block' : 'none';
     document.getElementById('input-word-text').required = isW;
     document.getElementById('input-word-meaning').required = isW;
-    document.getElementById('input-note-eng').required = !isW;
+    document.getElementById('input-note-eng').required = isN;
+    document.getElementById('input-question-question').required = type === 'question';
     const r = document.querySelector(`input[name="modal-type"][value="${type}"]`);
     if (r) r.checked = true;
 }
@@ -2003,6 +2217,11 @@ function openUnifiedModal() {
     document.getElementById('input-note-eng').value = selectedText || "";
     document.getElementById('input-note-trans').value = "";
     document.getElementById('input-note-extra').value = "";
+    document.getElementById('input-question-selected-text').value = selectedText || "";
+    document.getElementById('input-question-question').value = "";
+    document.getElementById('input-question-answer').value = "";
+    document.getElementById('input-question-explanation').value = "";
+    document.getElementById('input-question-memo').value = "";
 
     // デフォルトで「単語」タブを選択状態にする
     switchModalType('word');
@@ -2018,6 +2237,7 @@ function ensureArticleCollections(article) {
     if (!Array.isArray(article.words)) article.words = [];
     if (!Array.isArray(article.notes)) article.notes = [];
     if (!Array.isArray(article.bookmarks)) article.bookmarks = [];
+    if (!Array.isArray(article.questions)) article.questions = [];
 }
 
 function getActiveChapterIdForItem() {
@@ -2516,7 +2736,8 @@ function getLibraryBackupCounts(items = libraryItems) {
         chapters: articles.reduce((sum, article) => sum + (Array.isArray(article.chapters) ? article.chapters.length : 0), 0),
         words: articles.reduce((sum, article) => sum + (Array.isArray(article.words) ? article.words.length : 0), 0),
         notes: articles.reduce((sum, article) => sum + (Array.isArray(article.notes) ? article.notes.length : 0), 0),
-        bookmarks: articles.reduce((sum, article) => sum + (Array.isArray(article.bookmarks) ? article.bookmarks.length : 0), 0)
+        bookmarks: articles.reduce((sum, article) => sum + (Array.isArray(article.bookmarks) ? article.bookmarks.length : 0), 0),
+        questions: articles.reduce((sum, article) => sum + (Array.isArray(article.questions) ? article.questions.length : 0), 0)
     };
 }
 

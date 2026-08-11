@@ -326,6 +326,16 @@ input, textarea, select { font-size: 16px !important; }
 .unified-modal-content textarea { padding: 8px 9px; }
 .unified-modal-content .modal-actions { margin-top: 12px; }
 .unified-modal-content .btn-save { padding: 8px 16px; }
+.chapter-mode-option { display: flex !important; align-items: center; gap: 7px; margin-top: 10px !important; font-weight: normal !important; }
+.chapter-mode-option input { width: auto !important; }
+.question-review-modal { max-width: 540px; }
+.question-review-field { margin: 10px 0; }
+.question-review-value,
+.question-review-hidden-value { margin-top: 4px; padding: 9px 10px; border-radius: 6px; background: #faf7f2; white-space: pre-wrap; overflow-wrap: anywhere; }
+.question-review-reveal-group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 9px; }
+.question-review-reveal-group button { min-height: 38px; padding: 7px 12px; cursor: pointer; }
+.question-marker { display: inline-block; min-width: 1.8em; margin: 0 2px; padding: 2px 5px; border-bottom: 2px solid #c28b37; border-radius: 4px; background: #fff4d6; color: #704f1c; cursor: pointer; line-height: 1.45; }
+.question-marker:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* モーダル内のタブ切り替え */
 .modal-type-switch { display: flex; background: #eee; padding: 4px; border-radius: 8px; margin-bottom: 15px; }
