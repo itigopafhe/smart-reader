@@ -244,11 +244,12 @@
 
     <aside id="side-panel" class="panel">
         <div class="panel-header">
-            <nav class="tabs">
+            <nav id="panel-tabs" class="tabs">
                 <button class="tab-btn active" onclick="switchTab('words')">単語</button>
                 <button class="tab-btn" onclick="switchTab('notes')">ノート</button>
                 <button class="tab-btn" onclick="switchTab('settings')">⚙️</button>
             </nav>
+            <h2 id="problem-panel-heading" class="problem-panel-heading" hidden>問題</h2>
             <button type="button" id="panel-expand-btn" class="panel-expand-btn" onclick="toggleMobilePanelSize()" aria-label="単語帳を拡大" aria-pressed="false">⤢</button>
             <button class="close-btn" onclick="togglePanel()">✕</button>
         </div>
@@ -258,7 +259,6 @@
                 <input type="text" id="list-search" placeholder="リスト内検索..." oninput="handleListSearch()" style="margin-bottom:0; flex:1;">
                 <button onclick="exportToCSV()" class="btn-export">⬇️</button>
             </div>
-        </div>
         <div id="article-vocabulary-statistics" class="article-vocabulary-statistics" aria-live="polite"></div>
 
         <div class="control-row">
@@ -282,7 +282,45 @@
             </div>
         </div>
         <div id="panel-content" class="scroll-area"></div>
-   
+        <div id="problem-panel-content" class="scroll-area problem-panel-content" hidden onclick="event.stopPropagation()">
+            <div id="problem-panel-view">
+                <div class="problem-panel-field"><strong>選択したテキスト</strong><div id="problem-panel-selected" class="problem-panel-value"></div></div>
+                <div class="problem-panel-field"><strong>問題</strong><div id="problem-panel-question" class="problem-panel-value"></div></div>
+                <div class="problem-panel-reveal-group">
+                    <button type="button" id="problem-answer-toggle" onclick="toggleProblemPanelField('answer')">回答を見る</button>
+                    <div id="problem-panel-answer" class="problem-panel-hidden-value" hidden></div>
+                </div>
+                <div class="problem-panel-reveal-group">
+                    <button type="button" id="problem-explanation-toggle" onclick="toggleProblemPanelField('explanation')">解説を見る</button>
+                    <div id="problem-panel-explanation" class="problem-panel-hidden-value" hidden></div>
+                </div>
+                <div class="problem-panel-reveal-group">
+                    <button type="button" id="problem-memo-toggle" onclick="toggleProblemPanelField('memo')">メモを見る</button>
+                    <div id="problem-panel-memo" class="problem-panel-hidden-value" hidden></div>
+                </div>
+                <div class="problem-panel-actions">
+                    <button type="button" onclick="editProblemPanel()">編集</button>
+                    <button type="button" class="del" onclick="deleteProblemPanel()">削除</button>
+                </div>
+            </div>
+            <form id="problem-panel-edit" hidden onsubmit="saveProblemPanelEdit(event)">
+                <label>選択したテキスト</label>
+                <textarea id="problem-edit-selected-text" rows="2" readonly aria-label="選択したテキスト"></textarea>
+                <label>問題</label>
+                <textarea id="problem-edit-question" rows="3" required></textarea>
+                <label>回答</label>
+                <textarea id="problem-edit-answer" rows="3"></textarea>
+                <label>解説</label>
+                <textarea id="problem-edit-explanation" rows="3"></textarea>
+                <label>メモ</label>
+                <textarea id="problem-edit-memo" rows="2"></textarea>
+                <div class="problem-panel-actions">
+                    <button type="button" onclick="cancelProblemPanelEdit()">中止</button>
+                    <button type="submit" class="btn-save">保存</button>
+                </div>
+            </form>
+        </div>
+
     </aside>
 
     <button id="add-btn" class="fab-btn" onclick="openUnifiedModal()">＋</button>
@@ -357,49 +395,6 @@
                 <button type="button" onclick="document.getElementById('move-modal-overlay').classList.remove('show')">中止</button>
                 <button type="button" onclick="submitMove()" class="btn-save">移動</button>
             </div>
-        </div>
-    </div>
-
-    <div id="question-review-overlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="question-review-title">
-        <div class="modal-content question-review-modal">
-            <h2 id="question-review-title">問題</h2>
-            <div id="question-review-view">
-                <div class="question-review-field"><strong>選択したテキスト</strong><div id="question-review-selected" class="question-review-value"></div></div>
-                <div class="question-review-field"><strong>問題</strong><div id="question-review-question" class="question-review-value"></div></div>
-                <div class="question-review-reveal-group">
-                    <button type="button" id="question-answer-toggle" onclick="toggleQuestionReviewField('answer')">回答を見る</button>
-                    <div id="question-review-answer" class="question-review-hidden-value" hidden></div>
-                </div>
-                <div class="question-review-reveal-group">
-                    <button type="button" id="question-explanation-toggle" onclick="toggleQuestionReviewField('explanation')">解説を見る</button>
-                    <div id="question-review-explanation" class="question-review-hidden-value" hidden></div>
-                </div>
-                <div class="question-review-reveal-group">
-                    <button type="button" id="question-memo-toggle" onclick="toggleQuestionReviewField('memo')">メモを見る</button>
-                    <div id="question-review-memo" class="question-review-hidden-value" hidden></div>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" onclick="editQuestionReview()">編集</button>
-                    <button type="button" class="del" onclick="deleteQuestionReview()">削除</button>
-                    <button type="button" onclick="closeQuestionReview()">閉じる</button>
-                </div>
-            </div>
-            <form id="question-review-edit" style="display:none;" onsubmit="saveQuestionReviewEdit(event)">
-                <label>選択したテキスト</label>
-                <textarea id="question-edit-selected-text" rows="2" readonly aria-label="選択したテキスト"></textarea>
-                <label>問題</label>
-                <textarea id="question-edit-question" rows="3" required></textarea>
-                <label>回答</label>
-                <textarea id="question-edit-answer" rows="3"></textarea>
-                <label>解説</label>
-                <textarea id="question-edit-explanation" rows="3"></textarea>
-                <label>メモ</label>
-                <textarea id="question-edit-memo" rows="2"></textarea>
-                <div class="modal-actions">
-                    <button type="button" onclick="cancelQuestionReviewEdit()">中止</button>
-                    <button type="submit" class="btn-save">保存</button>
-                </div>
-            </form>
         </div>
     </div>
 

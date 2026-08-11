@@ -328,18 +328,23 @@ input, textarea, select { font-size: 16px !important; }
 .unified-modal-content .btn-save { padding: 8px 16px; }
 .chapter-mode-option { display: flex !important; align-items: center; gap: 7px; margin-top: 10px !important; font-weight: normal !important; }
 .chapter-mode-option input { width: auto !important; }
-.question-review-modal { max-width: 540px; }
-.question-review-field { margin: 10px 0; }
-.question-review-value,
-.question-review-hidden-value { margin-top: 4px; padding: 9px 10px; border-radius: 6px; background: #faf7f2; white-space: pre-wrap; overflow-wrap: anywhere; }
-.question-review-reveal-group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 9px; }
-.question-review-reveal-group button { min-height: 38px; padding: 7px 12px; cursor: pointer; }
 .question-marker,
 .problem-highlight { display: inline; margin: 0 2px; border-bottom: 2px solid #c28b37; border-radius: 4px; background: #fff4d6; color: #704f1c; cursor: pointer; line-height: 1.45; user-select: text; -webkit-user-select: text; }
 .problem-marker-badge { display: inline-flex; align-items: center; justify-content: center; width: 1.45em; min-width: 1.45em; height: 1.45em; margin: 0 3px 0 0; padding: 0; border: 1px solid #c28b37; border-radius: 50%; background: #fff; color: #704f1c; font-size: .8em; font-weight: 700; line-height: 1; cursor: pointer; vertical-align: middle; }
 .question-marker:focus-visible,
 .problem-highlight:focus-visible,
 .problem-marker-badge:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.problem-panel-heading { flex: 1; margin: 0; padding: 8px 12px; font-size: 1em; line-height: 1.3; }
+.problem-panel-content { padding: 12px; }
+.problem-panel-field { margin: 0 0 12px; }
+.problem-panel-value,
+.problem-panel-hidden-value { margin-top: 4px; padding: 8px 10px; border-radius: 6px; background: #faf7f2; white-space: pre-wrap; overflow-wrap: anywhere; }
+.problem-panel-reveal-group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 9px; }
+.problem-panel-reveal-group button,
+.problem-panel-actions button { min-height: 36px; padding: 7px 12px; cursor: pointer; }
+.problem-panel-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.problem-panel-content label { display: block; margin: 9px 0 4px; font-size: .85em; font-weight: 700; color: #555; }
+.problem-panel-content textarea { width: 100%; box-sizing: border-box; padding: 8px 9px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
 
 /* モーダル内のタブ切り替え */
 .modal-type-switch { display: flex; background: #eee; padding: 4px; border-radius: 8px; margin-bottom: 15px; }

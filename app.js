@@ -77,7 +77,8 @@ let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
 let editingSourceIndex = null;
-let questionReviewState = { id: null, answer: false, explanation: false, memo: false };
+let problemPanelState = { id: null, answer: false, explanation: false, memo: false, mode: 'view' };
+let sidePanelMode = 'vocabulary';
 let readingPositionSaveTimer = null;
 let suppressReadingPositionSave = false;
 let readingPositionRestoreToken = 0;
@@ -1692,6 +1693,10 @@ async function switchToChapter(chapterId, options = {}) {
     await saveToDB();
 
     currentChapterId = target.id;
+    if (sidePanelMode === 'problem') {
+        const openQuestion = getCurrentQuestion();
+        if (!isQuestionInChapter(openQuestion, targetId)) closeProblemPanel(true);
+    }
     renderChapterNavigation();
     renderArticleText();
     reapplyReaderSearchForCurrentContent();
@@ -1751,13 +1756,19 @@ function openArticle(id) {
     restoreReadingPosition(getSavedPositionForChapter(currentArticle, currentChapterId));
 }
 
+function isQuestionInChapter(question, chapterId) {
+    if (!question) return false;
+    if (question.chapterId !== undefined && question.chapterId !== null && question.chapterId !== '' && String(question.chapterId) !== String(chapterId)) return false;
+    if (hasStoredChapters(currentArticle) && (question.chapterId === undefined || question.chapterId === null || question.chapterId === '') && String(chapterId) !== String(getArticleChapters(currentArticle)[0]?.id)) return false;
+    return true;
+}
+
 function getQuestionMarkerEntries(paragraphs, chapterId) {
     const questions = Array.isArray(currentArticle?.questions) ? currentArticle.questions : [];
     const byParagraph = new Map();
     questions.forEach((question, questionIndex) => {
         if (!question) return;
-        if (question.chapterId !== undefined && question.chapterId !== null && String(question.chapterId) !== String(chapterId)) return;
-        if (hasStoredChapters(currentArticle) && (question.chapterId === undefined || question.chapterId === null || question.chapterId === '') && String(chapterId) !== String(getArticleChapters(currentArticle)[0]?.id)) return;
+        if (!isQuestionInChapter(question, chapterId)) return;
         const selected = String(question.selectedText || question.anchor?.selectedText || '');
         if (!selected) return;
         const anchor = question.anchor || {};
@@ -1872,7 +1883,7 @@ function handleReaderClick(e) {
     const questionTarget = target?.closest?.('.problem-marker-badge, .problem-highlight, .question-marker');
     if (questionTarget?.dataset?.questionId) {
         e.stopPropagation();
-        openQuestionReview(questionTarget.dataset.questionId);
+        openProblemPanel(questionTarget.dataset.questionId);
         return;
     }
     const existingTarget = target?.closest?.('[data-jump-id]');
@@ -1886,93 +1897,113 @@ function handleReaderKeydown(event) {
     const target = event.target?.closest ? event.target.closest('.problem-marker-badge, .problem-highlight, .question-marker') : null;
     if (!target?.dataset?.questionId || hasActiveReaderTextSelection()) return;
     event.preventDefault();
-    openQuestionReview(target.dataset.questionId);
+    openProblemPanel(target.dataset.questionId);
 }
 
-function getCurrentQuestion(id = questionReviewState.id) {
+function getCurrentQuestion(id = problemPanelState.id) {
     if (!currentArticle || !Array.isArray(currentArticle.questions)) return null;
     return currentArticle.questions.find(question => question && String(question.id) === String(id)) || null;
 }
 
-function setQuestionReviewField(field, visible) {
+function setProblemPanelField(field, visible) {
     const question = getCurrentQuestion();
     if (!question) return;
-    questionReviewState[field] = !!visible;
-    const value = document.getElementById(`question-review-${field}`);
-    const toggle = document.getElementById(`question-${field}-toggle`);
+    problemPanelState[field] = !!visible;
+    const value = document.getElementById(`problem-panel-${field}`);
+    const toggle = document.getElementById(`problem-${field}-toggle`);
     if (value) {
         value.hidden = !visible;
         value.textContent = String(question[field] || '');
     }
-    if (toggle) toggle.textContent = visible ? `${field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ'}を隠す` : `${field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ'}を見る`;
+    if (toggle) {
+        const label = field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ';
+        toggle.textContent = visible ? `${label}を隠す` : `${label}を見る`;
+    }
 }
 
-function toggleQuestionReviewField(field) {
-    setQuestionReviewField(field, !questionReviewState[field]);
+function toggleProblemPanelField(field) {
+    setProblemPanelField(field, !problemPanelState[field]);
 }
 
-function renderQuestionReview() {
+function renderProblemPanel() {
     const question = getCurrentQuestion();
     if (!question) return;
-    document.getElementById('question-review-selected').textContent = String(question.selectedText || question.anchor?.selectedText || '');
-    document.getElementById('question-review-question').textContent = String(question.question || '');
-    ['answer', 'explanation', 'memo'].forEach(field => setQuestionReviewField(field, questionReviewState[field]));
+    document.getElementById('problem-panel-selected').textContent = String(question.selectedText || question.anchor?.selectedText || '');
+    document.getElementById('problem-panel-question').textContent = String(question.question || '');
+    ['answer', 'explanation', 'memo'].forEach(field => setProblemPanelField(field, problemPanelState[field]));
+    document.getElementById('problem-panel-view').hidden = problemPanelState.mode === 'edit';
+    document.getElementById('problem-panel-edit').hidden = problemPanelState.mode !== 'edit';
 }
 
-function openQuestionReview(id) {
+function setProblemPanelMode(active) {
+    const panelTabs = document.getElementById('panel-tabs');
+    const heading = document.getElementById('problem-panel-heading');
+    const panelControls = document.getElementById('anki-wrapper');
+    const vocabularyStats = document.getElementById('article-vocabulary-statistics');
+    const panelContent = document.getElementById('panel-content');
+    const problemContent = document.getElementById('problem-panel-content');
+    sidePanelMode = active ? 'problem' : 'vocabulary';
+    if (panelTabs) panelTabs.hidden = active;
+    if (heading) heading.hidden = !active;
+    if (panelControls) panelControls.hidden = active;
+    if (vocabularyStats) vocabularyStats.hidden = active;
+    if (panelContent) panelContent.hidden = active;
+    if (problemContent) problemContent.hidden = !active;
+}
+
+function openProblemPanel(id) {
     const question = getCurrentQuestion(id);
     if (!question) return;
-    questionReviewState = { id: question.id, answer: false, explanation: false, memo: false };
-    document.getElementById('question-review-view').style.display = 'block';
-    document.getElementById('question-review-edit').style.display = 'none';
-    renderQuestionReview();
-    lockReaderScrollForModal();
-    document.getElementById('question-review-overlay').classList.add('show');
+    problemPanelState = { id: question.id, answer: false, explanation: false, memo: false, mode: 'view' };
+    setProblemPanelMode(true);
+    renderProblemPanel();
+    document.getElementById('side-panel')?.classList.add('is-open');
 }
 
-function closeQuestionReview() {
-    document.getElementById('question-review-overlay')?.classList.remove('show');
-    unlockReaderScrollForModal();
-    questionReviewState = { id: null, answer: false, explanation: false, memo: false };
+function closeProblemPanel(closePanel = true) {
+    setProblemPanelMode(false);
+    problemPanelState = { id: null, answer: false, explanation: false, memo: false, mode: 'view' };
+    if (closePanel) document.getElementById('side-panel')?.classList.remove('is-open');
 }
 
-function editQuestionReview() {
+function editProblemPanel() {
     const question = getCurrentQuestion();
     if (!question) return;
-    document.getElementById('question-edit-selected-text').value = String(question.selectedText || question.anchor?.selectedText || '');
-    document.getElementById('question-edit-question').value = String(question.question || '');
-    document.getElementById('question-edit-answer').value = String(question.answer || '');
-    document.getElementById('question-edit-explanation').value = String(question.explanation || '');
-    document.getElementById('question-edit-memo').value = String(question.memo || '');
-    document.getElementById('question-review-view').style.display = 'none';
-    document.getElementById('question-review-edit').style.display = 'block';
+    document.getElementById('problem-edit-selected-text').value = String(question.selectedText || question.anchor?.selectedText || '');
+    document.getElementById('problem-edit-question').value = String(question.question || '');
+    document.getElementById('problem-edit-answer').value = String(question.answer || '');
+    document.getElementById('problem-edit-explanation').value = String(question.explanation || '');
+    document.getElementById('problem-edit-memo').value = String(question.memo || '');
+    problemPanelState.mode = 'edit';
+    renderProblemPanel();
 }
 
-function cancelQuestionReviewEdit() {
-    document.getElementById('question-review-view').style.display = 'block';
-    document.getElementById('question-review-edit').style.display = 'none';
+function cancelProblemPanelEdit() {
+    problemPanelState.mode = 'view';
+    renderProblemPanel();
 }
 
-async function saveQuestionReviewEdit(event) {
+async function saveProblemPanelEdit(event) {
     event?.preventDefault();
     const question = getCurrentQuestion();
     if (!question) return;
-    question.question = document.getElementById('question-edit-question').value;
-    question.answer = document.getElementById('question-edit-answer').value;
-    question.explanation = document.getElementById('question-edit-explanation').value;
-    question.memo = document.getElementById('question-edit-memo').value;
+    question.question = document.getElementById('problem-edit-question').value;
+    question.answer = document.getElementById('problem-edit-answer').value;
+    question.explanation = document.getElementById('problem-edit-explanation').value;
+    question.memo = document.getElementById('problem-edit-memo').value;
     await saveToDB();
-    closeQuestionReview();
+    problemPanelState.mode = 'view';
+    renderProblemPanel();
     rerenderReaderAtPosition(captureReadingPosition());
 }
 
-async function deleteQuestionReview() {
+async function deleteProblemPanel() {
     if (!currentArticle || !Array.isArray(currentArticle.questions)) return;
     if (typeof window.confirm === 'function' && !window.confirm('この問題登録だけを削除しますか？本文は削除されません。')) return;
-    const id = questionReviewState.id;
+    const id = problemPanelState.id;
     currentArticle.questions = currentArticle.questions.filter(question => String(question?.id) !== String(id));
     await saveToDB();
-    closeQuestionReview();
+    closeProblemPanel(true);
     rerenderReaderAtPosition(captureReadingPosition());
 }
 
@@ -2538,6 +2569,11 @@ function togglePanel() {
     const panel = document.getElementById('side-panel');
     if (!panel) return;
     const opening = !panel.classList.contains('is-open');
+    if (!opening && sidePanelMode === 'problem') {
+        closeProblemPanel(true);
+        updateMobilePanelSizeButton();
+        return;
+    }
     panel.classList.toggle('is-open');
     if (opening) panel.classList.remove('is-expanded');
     updateMobilePanelSizeButton();
@@ -2704,7 +2740,13 @@ async function deleteListItem(id, type, sourceIndex = null) {
     renderList(type);
     rerenderReaderAtPosition(readingPosition);
 }
-function switchTab(t) { currentTab=t; document.getElementById('anki-wrapper').style.display=(t==='settings'?'none':'block'); document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',(i===0&&t==='words') || (i===1&&t==='notes') || (i===2&&t==='settings'))); renderList(t); }
+function switchTab(t) {
+    if (sidePanelMode === 'problem') closeProblemPanel(false);
+    currentTab = t;
+    document.getElementById('anki-wrapper').style.display = t === 'settings' ? 'none' : 'block';
+    document.querySelectorAll('.tab-btn').forEach((button, index) => button.classList.toggle('active', (index === 0 && t === 'words') || (index === 1 && t === 'notes') || (index === 2 && t === 'settings')));
+    renderList(t);
+}
 function openMoveModal(id) { movingItemId = id; const item = libraryItems.find(i => i.id === id); if(!item) return; document.getElementById('move-target-name').innerText = item.name; const s = document.getElementById('move-select'); s.innerHTML = '<option value="">🏠 Root</option>'; libraryItems.filter(i=>i.type==='folder'&&i.id!==id).forEach(f=>{ const o=document.createElement('option'); o.value=f.id; o.innerText=f.name; s.appendChild(o); }); document.getElementById('move-modal-overlay').classList.add('show'); }
 async function submitMove() { if(!movingItemId) return; const val = document.getElementById('move-select').value; const pid = val?parseInt(val):null; const item = libraryItems.find(i=>i.id===movingItemId); if(item){ item.parentId=pid; await saveToDB(); document.getElementById('move-modal-overlay').classList.remove('show'); showLibrary(); } }
 function exportToCSV() { if (!currentArticle || currentArticle.words.length === 0) { alert("データなし"); return; } let csv = "Word,Meaning,Memo\n"; currentArticle.words.forEach(i => { const e=t=>t?`"${t.replace(/"/g, '""')}"`:""; csv+=`${e(i.word)},${e(i.meaning)},${e(i.memo)}\n`; }); const b = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: 'text/csv' }); const l = document.createElement("a"); l.href=URL.createObjectURL(b); l.download="words.csv"; l.click(); }
