@@ -1778,6 +1778,34 @@ function getQuestionMarkerEntries(paragraphs, chapterId) {
     return byParagraph;
 }
 
+function renderQuestionMarkerText(selected, question, chapterId) {
+    const text = String(selected || '');
+    const words = (Array.isArray(currentArticle?.words) ? currentArticle.words : [])
+        .filter(word => {
+            if (!word || typeof word.word !== 'string' || word.word.length < 2) return false;
+            return word.chapterId === undefined || word.chapterId === null || String(word.chapterId) === String(chapterId);
+        })
+        .sort((left, right) => right.word.length - left.word.length);
+    const matches = [];
+    words.forEach(word => {
+        findSearchMatches(text, word.word, false, false).forEach(match => {
+            if (!matches.some(existing => match.index < existing.index + existing.length && existing.index < match.index + match.length)) {
+                matches.push({ ...match, word });
+            }
+        });
+    });
+    matches.sort((left, right) => left.index - right.index);
+    let cursor = 0;
+    let content = '';
+    matches.forEach(match => {
+        if (match.index > cursor) content += escapeHtml(text.slice(cursor, match.index));
+        content += `<span class="word-highlight" data-jump-id="${escapeHtml(String(match.word.id ?? ''))}" data-type="word">${escapeHtml(text.slice(match.index, match.index + match.length))}</span>`;
+        cursor = match.index + match.length;
+    });
+    if (cursor < text.length) content += escapeHtml(text.slice(cursor));
+    return `<span class="question-marker problem-highlight" data-question-id="${escapeHtml(String(question.id))}" data-type="question"><button type="button" class="problem-marker-badge" aria-label="問題を開く" data-question-id="${escapeHtml(String(question.id))}" data-type="question">Q</button><span class="problem-marker-text">${content}</span></span>`;
+}
+
 function renderArticleText() {
     if(!currentArticle) return;
     ensureArticleCollections(currentArticle);
@@ -1791,7 +1819,7 @@ function renderArticleText() {
         let source = paragraph;
         const entries = (questionMarkers.get(index) || []).sort((left, right) => right.start - left.start);
         entries.forEach(entry => {
-            const token = `__SMART_READER_QUESTION_${questionTokens.length}__`;
+            const token = `\uE000${questionTokens.length}\uE001`;
             questionTokens.push({ token, question: entry.question, selected: entry.selected });
             source = source.slice(0, entry.start) + token + source.slice(entry.start + entry.selected.length);
         });
@@ -1816,7 +1844,7 @@ function renderArticleText() {
     });
 
     questionTokens.forEach(({ token, question, selected }) => {
-        const marker = `<span class="question-marker" role="button" tabindex="0" aria-label="問題を開く" data-question-id="${escapeHtml(String(question.id))}" data-type="question">${escapeHtml(selected)}</span>`;
+        const marker = renderQuestionMarkerText(selected, question, currentChapterIdForHighlight);
         html = html.split(token).join(marker);
     });
 
@@ -1834,20 +1862,28 @@ function hasActiveReaderTextSelection() {
 
 function handleReaderClick(e) {
     if (hasActiveReaderTextSelection() || Date.now() < readerSelectionSuppressUntil) return;
-    const target = e.target.closest ? e.target.closest('[data-jump-id]') : e.target;
-    const questionTarget = e.target.closest ? e.target.closest('[data-type="question"]') : null;
+    const target = e.target;
+    const wordTarget = target?.closest?.('.word-highlight');
+    if (wordTarget?.dataset?.jumpId) {
+        e.stopPropagation();
+        jumpToResult(parseInt(wordTarget.dataset.jumpId), 'word');
+        return;
+    }
+    const questionTarget = target?.closest?.('.problem-marker-badge, .problem-highlight, .question-marker');
     if (questionTarget?.dataset?.questionId) {
+        e.stopPropagation();
         openQuestionReview(questionTarget.dataset.questionId);
         return;
     }
-    if (target && target.dataset && target.dataset.jumpId) {
-        jumpToResult(parseInt(target.dataset.jumpId), target.dataset.type);
+    const existingTarget = target?.closest?.('[data-jump-id]');
+    if (existingTarget?.dataset?.jumpId) {
+        jumpToResult(parseInt(existingTarget.dataset.jumpId), existingTarget.dataset.type);
     }
 }
 
 function handleReaderKeydown(event) {
     if (event?.key !== 'Enter' && event?.key !== ' ') return;
-    const target = event.target?.closest ? event.target.closest('[data-type="question"]') : null;
+    const target = event.target?.closest ? event.target.closest('.problem-marker-badge, .problem-highlight, .question-marker') : null;
     if (!target?.dataset?.questionId || hasActiveReaderTextSelection()) return;
     event.preventDefault();
     openQuestionReview(target.dataset.questionId);
