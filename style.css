@@ -869,6 +869,25 @@ input, textarea, select { font-size: 16px !important; }
 .global-vocabulary-summary {
     min-height: 38px;
 }
+.global-vocabulary-card-metadata {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-left: 4px;
+    max-width: 42%;
+    min-width: 0;
+}
+.global-vocabulary-chip {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: #596575;
+    font-size: 0.72em;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
 .global-vocabulary-summary input[type="checkbox"] {
     flex-shrink: 0;
 }
@@ -1238,6 +1257,7 @@ input, textarea, select { font-size: 16px !important; }
     .vocabulary-controls input[type="search"] { flex-basis: 100%; }
     .vocabulary-controls select { flex: 1 1 125px; max-width: none; }
     .global-vocabulary-list { padding: 10px; }
+    .global-vocabulary-card-metadata { max-width: 58%; }
     .global-vocabulary-details { padding-left: 4px; }
     .global-vocabulary-detail-row { display: block; }
     .global-vocabulary-detail-label { display: block; }

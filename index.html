@@ -16,7 +16,7 @@
         </div>
         <div id="article-meta" style="display:none;">
             <button onclick="editCurrentArticle()" class="small-edit-btn">編集</button>
-            <button onclick="showGlobalVocabulary()" class="small-edit-btn">Vocabulary</button>
+            <button onclick="showCurrentArticleVocabulary()" class="small-edit-btn">この資料の単語</button>
             <button onclick="showGlobalProblems()" class="small-edit-btn">Problems</button>
             <button onclick="openWordStatistics()" class="small-edit-btn">📊 統計</button>
             <a id="display-url" href="#" target="_blank">🔗 元記事</a>
@@ -54,19 +54,21 @@
                     <button class="btn-sub" onclick="showGlobalProblems()">Problems</button>
                     <button class="btn-sub" onclick="showLibrary()">📚 Library</button>
                     <div>
-                        <h2>Global Vocabulary</h2>
+                        <h2 id="global-vocab-title">Global Vocabulary</h2>
                         <span id="global-vocab-count" class="vocabulary-count">0 words</span>
                     </div>
                 </div>
                 <div id="global-vocab-statistics" class="vocabulary-statistics" aria-live="polite"></div>
                 <div class="vocabulary-controls">
-                    <input type="search" id="global-vocab-search" placeholder="単語・意味・メモ・出典を検索" oninput="updateGlobalVocabulary('query', this.value)">
+                    <input type="search" id="global-vocab-search" placeholder="単語・本文での表現・意味・タグ・出典を検索" oninput="updateGlobalVocabulary('query', this.value)">
                     <label class="vocabulary-check"><input type="checkbox" id="global-vocab-exact" onchange="updateGlobalVocabulary('exact', this.checked)"> 完全一致</label>
                     <select id="global-vocab-status" onchange="updateGlobalVocabulary('status', this.value)" aria-label="暗記状態">
                         <option value="all">すべて</option>
                         <option value="unmemorized">未暗記</option>
                         <option value="memorized">暗記済み</option>
                     </select>
+                    <select id="global-vocab-tag" onchange="updateGlobalVocabulary('tag', this.value)" aria-label="タグ"></select>
+                    <select id="global-vocab-part-of-speech" onchange="updateGlobalVocabulary('partOfSpeech', this.value)" aria-label="品詞"></select>
                     <select id="global-vocab-source" onchange="updateGlobalVocabulary('sourceId', this.value)" aria-label="出典"></select>
                     <select id="global-vocab-chapter" onchange="updateGlobalVocabulary('chapterId', this.value)" aria-label="章" style="display:none;"></select>
                     <select id="global-vocab-sort" onchange="updateGlobalVocabulary('sort', this.value)" aria-label="並び順">
@@ -378,6 +380,22 @@
                 <div id="form-word-section">
                     <label>単語 / フレーズ</label>
                     <input type="text" id="input-word-text" required>
+                    <label for="input-word-surface-text">本文での表現（surfaceText）</label>
+                    <input type="text" id="input-word-surface-text" placeholder="本文中に実際に出現した表現">
+                    <label for="input-word-part-of-speech">品詞</label>
+                    <select id="input-word-part-of-speech" class="full-width-select">
+                        <option value="">未設定</option>
+                        <option value="noun">名詞</option>
+                        <option value="verb">動詞</option>
+                        <option value="adjective">形容詞</option>
+                        <option value="adverb">副詞</option>
+                        <option value="phrase">句・フレーズ</option>
+                        <option value="preposition">前置詞</option>
+                        <option value="conjunction">接続詞</option>
+                        <option value="other">その他</option>
+                    </select>
+                    <label for="input-word-tags">タグ（カンマ区切り）</label>
+                    <input type="text" id="input-word-tags" placeholder="英語, 語彙, 苦手">
                     <label>意味</label>
                     <input type="text" id="input-word-meaning" required>
                     <label>メモ (任意)</label>

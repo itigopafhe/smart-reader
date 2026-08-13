@@ -106,6 +106,8 @@ let globalVocabularyState = {
     query: '',
     exact: false,
     status: 'all',
+    tag: 'all',
+    partOfSpeech: 'all',
     sourceId: 'all',
     chapterId: 'all',
     sort: 'newest',
@@ -1210,6 +1212,20 @@ function showLibrary() {
                 <button class="small-btn del" onclick="event.stopPropagation(); deleteLibraryItem(${item.id})">削除</button>
             </div>
         `;
+        if (item.type === 'article') {
+            const actions = card.querySelector('.card-actions');
+            if (actions) {
+                const vocabularyButton = document.createElement('button');
+                vocabularyButton.type = 'button';
+                vocabularyButton.className = 'small-btn';
+                vocabularyButton.textContent = 'Vocabulary';
+                vocabularyButton.addEventListener('click', event => {
+                    event.stopPropagation();
+                    showGlobalVocabularyForArticle(item.id);
+                });
+                actions.appendChild(vocabularyButton);
+            }
+        }
         list.appendChild(card);
     });
 }
@@ -1806,16 +1822,18 @@ function getQuestionMarkerEntries(paragraphs, chapterId) {
 function renderQuestionMarkerText(selected, question, chapterId, questionIndex = null) {
     const text = String(selected || '');
     const words = (Array.isArray(currentArticle?.words) ? currentArticle.words : [])
-        .filter(word => {
+        .map((word, wordIndex) => ({ word, wordIndex }))
+        .filter(({ word }) => {
             if (!word || typeof word.word !== 'string' || word.word.length < 2) return false;
             return word.chapterId === undefined || word.chapterId === null || String(word.chapterId) === String(chapterId);
         })
-        .sort((left, right) => right.word.length - left.word.length);
+        .filter(({ word }) => getVocabularyWordSurfaceText(word).length >= 2)
+        .sort((left, right) => getVocabularyWordSurfaceText(right.word).length - getVocabularyWordSurfaceText(left.word).length);
     const matches = [];
-    words.forEach(word => {
-        findSearchMatches(text, word.word, false, false).forEach(match => {
+    words.forEach(({ word, wordIndex }) => {
+        findSearchMatches(text, getVocabularyWordSurfaceText(word), false, false).forEach(match => {
             if (!matches.some(existing => match.index < existing.index + existing.length && existing.index < match.index + match.length)) {
-                matches.push({ ...match, word });
+                matches.push({ ...match, word, wordIndex });
             }
         });
     });
@@ -1824,7 +1842,8 @@ function renderQuestionMarkerText(selected, question, chapterId, questionIndex =
     let content = '';
     matches.forEach(match => {
         if (match.index > cursor) content += escapeHtml(text.slice(cursor, match.index));
-        content += `<span class="word-highlight" data-jump-id="${escapeHtml(String(match.word.id ?? ''))}" data-type="word">${escapeHtml(text.slice(match.index, match.index + match.length))}</span>`;
+        const wordId = hasGlobalWordId(match.word.id) ? ` data-jump-id="${escapeHtml(String(match.word.id))}"` : '';
+        content += `<span class="word-highlight"${wordId} data-word-index="${match.wordIndex}" data-type="word">${escapeHtml(text.slice(match.index, match.index + match.length))}</span>`;
         cursor = match.index + match.length;
     });
     if (cursor < text.length) content += escapeHtml(text.slice(cursor));
@@ -1862,12 +1881,16 @@ function renderArticleText() {
         html = html.replace(new RegExp(`(${escaped})`, 'gi'), `<span class="note-highlight" data-jump-id="${n.id}" data-type="note">$1</span>`);
     });
 
-    const sw = [...currentArticle.words].sort((a,b) => String(b.word || '').length - String(a.word || '').length);
-    sw.forEach(w => {
+    const sw = currentArticle.words
+        .map((word, wordIndex) => ({ word, wordIndex }))
+        .sort((a, b) => getVocabularyWordSurfaceText(b.word).length - getVocabularyWordSurfaceText(a.word).length);
+    sw.forEach(({ word: w, wordIndex }) => {
         if (w.chapterId !== undefined && w.chapterId !== null && String(w.chapterId) !== currentChapterIdForHighlight) return;
-        if (typeof w.word !== 'string' || w.word.length < 2) return;
-        const escaped = escapeRegExp(escapeHtml(w.word));
-        html = html.replace(new RegExp(`(?<!>)${escaped}(?!<)`, 'gi'), `<span class="word-highlight" data-jump-id="${w.id}" data-type="word">$&</span>`);
+        const surfaceText = getVocabularyWordSurfaceText(w);
+        if (surfaceText.length < 2) return;
+        const escaped = escapeRegExp(escapeHtml(surfaceText));
+        const wordId = hasGlobalWordId(w.id) ? ` data-jump-id="${escapeHtml(String(w.id))}"` : '';
+        html = html.replace(new RegExp(`(?<!>)${escaped}(?!<)`, 'gi'), `<span class="word-highlight"${wordId} data-word-index="${wordIndex}" data-type="word">$&</span>`);
     });
 
     questionTokens.forEach(({ token, question, selected, questionIndex }) => {
@@ -1891,9 +1914,11 @@ function handleReaderClick(e) {
     if (hasActiveReaderTextSelection() || Date.now() < readerSelectionSuppressUntil) return;
     const target = e.target;
     const wordTarget = target?.closest?.('.word-highlight');
-    if (wordTarget?.dataset?.jumpId) {
+    if (wordTarget && (wordTarget.dataset?.jumpId || wordTarget.dataset?.wordIndex !== undefined)) {
         e.stopPropagation();
-        jumpToResult(parseInt(wordTarget.dataset.jumpId), 'word');
+        const wordId = wordTarget.dataset.jumpId ? parseInt(wordTarget.dataset.jumpId, 10) : null;
+        const sourceIndex = Number.parseInt(wordTarget.dataset.wordIndex, 10);
+        jumpToResult(wordId, 'word', Number.isInteger(sourceIndex) ? sourceIndex : null);
         return;
     }
     const questionTarget = target?.closest?.('.problem-marker-badge, .problem-highlight, .question-marker');
@@ -1911,6 +1936,15 @@ function handleReaderClick(e) {
 
 function handleReaderKeydown(event) {
     if (event?.key !== 'Enter' && event?.key !== ' ') return;
+    const wordTarget = event.target?.closest ? event.target.closest('.word-highlight') : null;
+    if (wordTarget && (wordTarget.dataset?.jumpId || wordTarget.dataset?.wordIndex !== undefined) && !hasActiveReaderTextSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+        const wordId = wordTarget.dataset.jumpId ? parseInt(wordTarget.dataset.jumpId, 10) : null;
+        const sourceIndex = Number.parseInt(wordTarget.dataset.wordIndex, 10);
+        jumpToResult(wordId, 'word', Number.isInteger(sourceIndex) ? sourceIndex : null);
+        return;
+    }
     const target = event.target?.closest ? event.target.closest('.problem-marker-badge, .problem-highlight, .question-marker') : null;
     if (!target || (!hasGlobalProblemId(target.dataset?.questionId) && target.dataset?.questionIndex === undefined) || hasActiveReaderTextSelection()) return;
     event.preventDefault();
@@ -1928,8 +1962,8 @@ function jumpToResult(id, type, sourceIndex = null) {
     switchTab(tab);
     document.getElementById('side-panel').classList.add('is-open');
     setTimeout(() => {
-        const cardId = type === 'question' && !hasGlobalProblemId(id) && Number.isInteger(sourceIndex)
-            ? 'question-card-index-' + sourceIndex
+        const cardId = !hasGlobalProblemId(id) && Number.isInteger(sourceIndex)
+            ? `${type}-card-index-${sourceIndex}`
             : `${type}-card-${id}`;
         const card = document.getElementById(cardId);
         if (card) {
@@ -2261,7 +2295,9 @@ function renderList(type, filter = '') {
             return safe.replace(new RegExp(`(${escapedFilter})`, 'gi'), '<span class="text-highlight">$1</span>');
         };
         if (type === 'words') {
-            card.id = `word-card-${item.id}`;
+            card.id = item.id === undefined || item.id === null || item.id === ''
+                ? `word-card-index-${sourceIndex}`
+                : `word-card-${item.id}`;
             card.className = `note-card compact-card ${item.memorized ? 'memorized-item' : ''}`;
             card.onclick = () => isAnkiMode && card.classList.toggle('revealed');
             card.innerHTML = `
@@ -2333,12 +2369,8 @@ async function handleUnifiedSave(e) {
             }
         } else if (currentModalType === 'word') {
             const activeChapterId = getActiveChapterIdForItem();
-            const values = {
-                word: document.getElementById('input-word-text').value,
-                meaning: document.getElementById('input-word-meaning').value,
-                memo: document.getElementById('input-word-memo').value,
-                context: document.getElementById('input-word-context').value.trim()
-            };
+            const values = getVocabularyFormValues();
+            values.updatedAt = Date.now();
             const editIndex = resolveArticleCollectionIndex(currentArticle.words, editingId, editingSourceIndex);
             if (editIndex >= 0) {
                 const old = currentArticle.words[editIndex];
@@ -2424,8 +2456,12 @@ function editItem(id, type, sourceIndex = null) {
     editingSourceIndex = itemIndex;
     switchModalType(type);
     if (type === 'word') {
-        document.getElementById('input-word-text').value = item.word;
-        document.getElementById('input-word-meaning').value = item.meaning;
+        const metadata = getVocabularyWordRuntimeMetadata(item);
+        document.getElementById('input-word-text').value = item.word || '';
+        document.getElementById('input-word-surface-text').value = metadata.surfaceText;
+        document.getElementById('input-word-meaning').value = item.meaning || '';
+        document.getElementById('input-word-part-of-speech').value = metadata.partOfSpeech;
+        document.getElementById('input-word-tags').value = metadata.tags.join(', ');
         document.getElementById('input-word-memo').value = item.memo || '';
         document.getElementById('input-word-context').value = item.context || '';
     } else if (type === 'note') {
@@ -2450,7 +2486,10 @@ function openUnifiedModal() {
     
     // 入力欄をリセット（選択テキストがあれば自動入力）
     document.getElementById('input-word-text').value = selectedText || "";
+    document.getElementById('input-word-surface-text').value = selectedReaderCapture?.anchor?.selectedText || selectedText || "";
     document.getElementById('input-word-meaning').value = "";
+    document.getElementById('input-word-part-of-speech').value = "";
+    document.getElementById('input-word-tags').value = "";
     document.getElementById('input-word-memo').value = "";
     document.getElementById('input-word-context').value = selectedReaderCapture?.context || '';
     document.getElementById('input-note-eng').value = selectedText || "";
@@ -3575,6 +3614,50 @@ function hasGlobalWordId(wordId) {
     return wordId !== undefined && wordId !== null && wordId !== '';
 }
 
+const VOCABULARY_PARTS_OF_SPEECH = Object.freeze(['', 'noun', 'verb', 'adjective', 'adverb', 'phrase', 'preposition', 'conjunction', 'other']);
+
+function normalizeVocabularyTags(value) {
+    const rawTags = Array.isArray(value) ? value : String(value ?? '').split(/[,、]/);
+    return [...new Set(rawTags
+        .flatMap(tag => String(tag ?? '').split(/[,、]/))
+        .map(tag => tag.trim())
+        .filter(Boolean))];
+}
+
+function normalizeVocabularyPartOfSpeech(value) {
+    const partOfSpeech = String(value ?? '').trim();
+    return VOCABULARY_PARTS_OF_SPEECH.includes(partOfSpeech) ? partOfSpeech : '';
+}
+
+function getVocabularyWordSurfaceText(word) {
+    const surfaceText = String(word?.surfaceText || '').trim();
+    if (surfaceText) return surfaceText;
+    const anchorText = String(word?.anchor?.selectedText || '').trim();
+    return anchorText || String(word?.word || '').trim();
+}
+
+function getVocabularyWordRuntimeMetadata(word) {
+    return {
+        surfaceText: getVocabularyWordSurfaceText(word),
+        tags: normalizeVocabularyTags(word?.tags),
+        partOfSpeech: normalizeVocabularyPartOfSpeech(word?.partOfSpeech)
+    };
+}
+
+function getVocabularyFormValues() {
+    const canonical = String(document.getElementById('input-word-text')?.value || '').trim();
+    const enteredSurfaceText = String(document.getElementById('input-word-surface-text')?.value || '').trim();
+    return {
+        word: canonical,
+        surfaceText: enteredSurfaceText || canonical,
+        meaning: String(document.getElementById('input-word-meaning')?.value || ''),
+        partOfSpeech: normalizeVocabularyPartOfSpeech(document.getElementById('input-word-part-of-speech')?.value),
+        tags: normalizeVocabularyTags(document.getElementById('input-word-tags')?.value),
+        memo: String(document.getElementById('input-word-memo')?.value || ''),
+        context: String(document.getElementById('input-word-context')?.value || '').trim()
+    };
+}
+
 function getGlobalArticleTitle(article) {
     return String(article?.name || article?.title || '無題');
 }
@@ -3604,6 +3687,7 @@ function collectGlobalVocabulary() {
             words.forEach((word, sourceIndex) => {
                 const chapter = getGlobalChapterInfo(article, word);
                 const wordId = word?.id;
+                const metadata = getVocabularyWordRuntimeMetadata(word);
                 const key = hasGlobalWordId(wordId)
                     ? `${String(article.id)}::id::${String(wordId)}`
                     : `${String(article.id)}::index::${String(sourceIndex)}`;
@@ -3613,16 +3697,22 @@ function collectGlobalVocabulary() {
                     articleTitle: getGlobalArticleTitle(article),
                     chapterId: chapter.id,
                     chapterTitle: chapter.title,
+                    chapterKey: chapter.id === '' ? '' : `${String(article.id)}::${String(chapter.id)}`,
                     wordId,
                     sourceIndex,
                     word,
                     wordText: String(word?.word || ''),
+                    surfaceText: metadata.surfaceText,
+                    tags: metadata.tags,
+                    partOfSpeech: metadata.partOfSpeech,
                     meaning: String(word?.meaning || ''),
                     memo: String(word?.memo || ''),
                     context: word?.context,
                     contextMeaning: word?.contextMeaning,
                     memorized: !!word?.memorized,
                     createdAt: word?.createdAt,
+                    updatedAt: word?.updatedAt,
+                    sourceName: String(article?.sourceName || article?.name || article?.title || ''),
                     sequence: sequence++
                 });
             });
@@ -3676,15 +3766,22 @@ function getFilteredGlobalVocabulary() {
     let entries = state.entries.filter(entry => {
         if (state.status === 'memorized' && !entry.memorized) return false;
         if (state.status === 'unmemorized' && entry.memorized) return false;
+        if (state.tag !== 'all' && !entry.tags.includes(state.tag)) return false;
+        if (state.partOfSpeech === 'unset' && entry.partOfSpeech !== '') return false;
+        if (state.partOfSpeech !== 'all' && state.partOfSpeech !== 'unset' && entry.partOfSpeech !== state.partOfSpeech) return false;
         if (state.sourceId !== 'all' && String(entry.articleId) !== String(state.sourceId)) return false;
-        if (state.chapterId !== 'all' && String(entry.chapterId) !== String(state.chapterId)) return false;
+        if (state.chapterId !== 'all' && String(entry.chapterKey) !== String(state.chapterId)) return false;
 
         if (!query) return true;
         return [
             entry.wordText,
+            entry.surfaceText,
             entry.meaning,
             entry.memo,
+            entry.context,
+            entry.tags.join(' '),
             entry.articleTitle,
+            entry.sourceName,
             entry.chapterTitle
         ].some(value => globalVocabularyFieldMatches(value, query, state.exact));
     });
@@ -3730,11 +3827,27 @@ function groupGlobalVocabularyEntries(entries) {
     return Array.from(groups.values());
 }
 
+function appendGlobalVocabularyOption(select, value, label) {
+    if (!select) return;
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = String(label);
+    select.appendChild(option);
+}
+
 function renderGlobalVocabularyControls() {
     const state = globalVocabularyState;
     const sourceSelect = document.getElementById('global-vocab-source');
     const chapterSelect = document.getElementById('global-vocab-chapter');
+    const tagSelect = document.getElementById('global-vocab-tag');
+    const partOfSpeechSelect = document.getElementById('global-vocab-part-of-speech');
     if (!sourceSelect || !chapterSelect) return;
+
+    const title = document.getElementById('global-vocab-title');
+    const selectedArticle = state.sourceId === 'all'
+        ? null
+        : state.entries.find(entry => String(entry.articleId) === String(state.sourceId));
+    if (title) title.textContent = selectedArticle ? `Global Vocabulary · ${selectedArticle.articleTitle}` : 'Global Vocabulary';
 
     const articles = [];
     state.entries.forEach(entry => {
@@ -3756,6 +3869,38 @@ function renderGlobalVocabularyControls() {
     });
     if (!articles.some(article => String(article.id) === String(state.sourceId))) state.sourceId = 'all';
     sourceSelect.value = String(state.sourceId);
+
+    const tags = Array.from(new Set(state.entries.flatMap(entry => entry.tags || [])))
+        .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }));
+    if (tagSelect) {
+        tagSelect.innerHTML = '';
+        appendGlobalVocabularyOption(tagSelect, 'all', 'すべてのタグ');
+        tags.forEach(tag => appendGlobalVocabularyOption(tagSelect, tag, tag));
+        if (!tags.includes(state.tag)) state.tag = 'all';
+        tagSelect.value = state.tag;
+    }
+
+    const partOfSpeechLabels = {
+        '': '未設定',
+        noun: '名詞',
+        verb: '動詞',
+        adjective: '形容詞',
+        adverb: '副詞',
+        phrase: '句・フレーズ',
+        preposition: '前置詞',
+        conjunction: '接続詞',
+        other: 'その他'
+    };
+    if (partOfSpeechSelect) {
+        partOfSpeechSelect.innerHTML = '';
+        appendGlobalVocabularyOption(partOfSpeechSelect, 'all', 'すべての品詞');
+        appendGlobalVocabularyOption(partOfSpeechSelect, 'unset', partOfSpeechLabels['']);
+        VOCABULARY_PARTS_OF_SPEECH.filter(value => value !== '').forEach(value => {
+            appendGlobalVocabularyOption(partOfSpeechSelect, value, partOfSpeechLabels[value] || value);
+        });
+        if (!VOCABULARY_PARTS_OF_SPEECH.includes(state.partOfSpeech) && !['all', 'unset'].includes(state.partOfSpeech)) state.partOfSpeech = 'all';
+        partOfSpeechSelect.value = state.partOfSpeech;
+    }
 
     const chapters = [];
     state.entries
@@ -3779,11 +3924,11 @@ function renderGlobalVocabularyControls() {
     chapterSelect.appendChild(allChapters);
     chapters.forEach(chapter => {
         const option = document.createElement('option');
-        option.value = String(chapter.id);
+        option.value = String(chapter.key);
         option.textContent = chapter.title;
         chapterSelect.appendChild(option);
     });
-    if (!chapters.some(chapter => String(chapter.id) === String(state.chapterId))) state.chapterId = 'all';
+    if (!chapters.some(chapter => String(chapter.key) === String(state.chapterId))) state.chapterId = 'all';
     chapterSelect.value = String(state.chapterId);
     chapterSelect.style.display = chapters.length > 0 ? '' : 'none';
 
@@ -3933,7 +4078,7 @@ function appendGlobalVocabularyContext(container, entry) {
     if (isOpen) {
         const panel = document.createElement('div');
         panel.className = 'global-vocabulary-context-panel';
-        appendGlobalVocabularyContextText(panel, context, entry.wordText, {
+        appendGlobalVocabularyContextText(panel, context, entry.surfaceText || entry.wordText, {
             interactive: isAnkiModeActive,
             entryKey: key
         });
@@ -4005,7 +4150,21 @@ function createGlobalVocabularyCard(entry, { forceExpanded = false } = {}) {
     const word = document.createElement('span');
     word.className = 'word-text';
     word.textContent = entry.wordText;
-    left.append(check, speaker, word);
+    const metadata = document.createElement('span');
+    metadata.className = 'global-vocabulary-card-metadata';
+    if (entry.partOfSpeech) {
+        const partOfSpeech = document.createElement('span');
+        partOfSpeech.className = 'global-vocabulary-chip';
+        partOfSpeech.textContent = getVocabularyPartOfSpeechLabel(entry.partOfSpeech);
+        metadata.appendChild(partOfSpeech);
+    }
+    (entry.tags || []).forEach(tag => {
+        const tagElement = document.createElement('span');
+        tagElement.className = 'global-vocabulary-chip';
+        tagElement.textContent = tag;
+        metadata.appendChild(tagElement);
+    });
+    left.append(check, speaker, word, metadata);
     const meaning = document.createElement('div');
     meaning.className = 'meaning-right';
     meaning.textContent = entry.meaning;
@@ -4018,6 +4177,9 @@ function createGlobalVocabularyCard(entry, { forceExpanded = false } = {}) {
         details.className = 'global-vocabulary-details';
         addGlobalVocabularyDetail(details, '出典', entry.articleTitle);
         if (entry.chapterTitle) addGlobalVocabularyDetail(details, '章', entry.chapterTitle);
+        if (entry.surfaceText && entry.surfaceText !== entry.wordText) addGlobalVocabularyDetail(details, '本文での表現', entry.surfaceText);
+        if (entry.partOfSpeech) addGlobalVocabularyDetail(details, '品詞', getVocabularyPartOfSpeechLabel(entry.partOfSpeech));
+        if (entry.tags.length) addGlobalVocabularyDetail(details, 'タグ', entry.tags.join(', '));
         if (entry.memo) addGlobalVocabularyDetail(details, 'Memo', entry.memo);
         if (entry.contextMeaning) addGlobalVocabularyDetail(details, 'Context訳', entry.contextMeaning);
         appendGlobalVocabularyContext(details, entry);
@@ -4072,6 +4234,16 @@ function createGlobalVocabularyGroupCard(group) {
     const meaningLabel = meanings.length <= 1 ? (meanings[0] || '') : `${meanings.length} meanings`;
     label.textContent = `${meaningLabel} · × ${group.entries.length} · ${memorized}/${group.entries.length} 暗記済み`;
     summary.append(word, label);
+    const groupTags = Array.from(new Set(group.entries.flatMap(entry => entry.tags || [])));
+    const groupMetadata = document.createElement('span');
+    groupMetadata.className = 'global-vocabulary-card-metadata';
+    groupTags.forEach(tag => {
+        const tagElement = document.createElement('span');
+        tagElement.className = 'global-vocabulary-chip';
+        tagElement.textContent = tag;
+        groupMetadata.appendChild(tagElement);
+    });
+    if (groupMetadata.childElementCount) summary.appendChild(groupMetadata);
     summary.addEventListener('click', () => {
         globalVocabularyState.expandedKey = expanded ? null : `group:${group.key}`;
         renderGlobalVocabulary();
@@ -4152,6 +4324,8 @@ function updateGlobalVocabulary(field, value) {
     if (field === 'query') globalVocabularyState.query = String(value || '');
     if (field === 'exact') globalVocabularyState.exact = !!value;
     if (field === 'status') globalVocabularyState.status = value;
+    if (field === 'tag') globalVocabularyState.tag = value || 'all';
+    if (field === 'partOfSpeech') globalVocabularyState.partOfSpeech = value || 'all';
     if (field === 'sourceId') {
         globalVocabularyState.sourceId = value;
         globalVocabularyState.chapterId = 'all';
@@ -4159,6 +4333,17 @@ function updateGlobalVocabulary(field, value) {
     if (field === 'chapterId') globalVocabularyState.chapterId = value;
     if (field === 'sort') globalVocabularyState.sort = value;
     renderGlobalVocabulary();
+}
+
+function showGlobalVocabularyForArticle(articleId) {
+    globalVocabularyState.sourceId = articleId === undefined || articleId === null ? 'all' : String(articleId);
+    globalVocabularyState.chapterId = 'all';
+    showGlobalVocabulary();
+}
+
+function showCurrentArticleVocabulary() {
+    if (currentArticle) showGlobalVocabularyForArticle(currentArticle.id);
+    else showGlobalVocabulary();
 }
 
 function toggleGlobalAnkiMode() {
@@ -4211,8 +4396,12 @@ function openGlobalVocabularyWordEditor(key) {
     };
     editingId = source.word.id;
     switchModalType('word');
+    const metadata = getVocabularyWordRuntimeMetadata(source.word);
     document.getElementById('input-word-text').value = source.word.word || '';
+    document.getElementById('input-word-surface-text').value = metadata.surfaceText;
     document.getElementById('input-word-meaning').value = source.word.meaning || '';
+    document.getElementById('input-word-part-of-speech').value = metadata.partOfSpeech;
+    document.getElementById('input-word-tags').value = metadata.tags.join(', ');
     document.getElementById('input-word-memo').value = source.word.memo || '';
     document.getElementById('input-word-context').value = source.word.context || '';
     showUnifiedModal();
@@ -4234,12 +4423,7 @@ async function saveGlobalVocabularyWordFromModal() {
         return;
     }
 
-    article.words[wordIndex] = Object.assign({}, oldWord, {
-        word: document.getElementById('input-word-text').value,
-        meaning: document.getElementById('input-word-meaning').value,
-        memo: document.getElementById('input-word-memo').value,
-        context: document.getElementById('input-word-context').value.trim()
-    });
+    article.words[wordIndex] = Object.assign({}, oldWord, getVocabularyFormValues(), { updatedAt: Date.now() });
     await saveToDB();
     closeModal();
     globalVocabularyState.entries = collectGlobalVocabulary();
@@ -4344,7 +4528,10 @@ function openGlobalVocabularyEntry(key) {
         }
 
         const paragraphs = getReaderParagraphs(getCurrentChapterContent());
-        const resolution = findAnchorInParagraphs(paragraphs, source.word.anchor, source.word.context);
+        const anchor = source.word.anchor && typeof source.word.anchor === 'object'
+            ? { ...source.word.anchor, selectedText: source.word.anchor.selectedText || entry.surfaceText || entry.wordText }
+            : { selectedText: entry.surfaceText || entry.wordText };
+        const resolution = findAnchorInParagraphs(paragraphs, anchor, source.word.context);
         if (resolution && flashReaderAnchor(resolution, source.word)) return;
 
         const position = getGlobalWordPosition(source.word);
@@ -4352,9 +4539,9 @@ function openGlobalVocabularyEntry(key) {
 
         const display = document.getElementById('text-display');
         const target = display
-            ? Array.from(display.querySelectorAll('[data-jump-id]')).find(element =>
-                globalIdsEqual(element.dataset.jumpId, source.word.id) &&
-                element.dataset.type === 'word')
+            ? Array.from(display.querySelectorAll('.word-highlight')).find(element =>
+                (hasGlobalWordId(source.word.id) && globalIdsEqual(element.dataset.jumpId, source.word.id)) ||
+                Number.parseInt(element.dataset.wordIndex, 10) === source.index)
             : null;
         if (target) {
             target.classList.add('temporary-reader-highlight');
@@ -4385,16 +4572,20 @@ function exportGlobalVocabularyCSV() {
         alert('データなし');
         return;
     }
-    const header = ['Word', 'Meaning', 'Memo', 'Context', 'Article', 'Chapter', 'Memorized', 'CreatedAt'];
+    const header = ['Word', 'SurfaceText', 'Meaning', 'PartOfSpeech', 'Tags', 'Memo', 'Context', 'Article', 'Chapter', 'Memorized', 'CreatedAt', 'UpdatedAt'];
     const rows = entries.map(entry => [
         entry.wordText,
+        entry.surfaceText,
         entry.meaning,
+        entry.partOfSpeech,
+        entry.tags.join(', '),
         entry.memo,
         entry.context || '',
         entry.articleTitle,
         entry.chapterTitle,
         entry.memorized ? 'true' : 'false',
-        entry.createdAt || ''
+        entry.createdAt || '',
+        entry.updatedAt || ''
     ]);
     const csv = [header, ...rows].map(row => row.map(globalCsvValue).join(',')).join('\r\n') + '\r\n';
     downloadGlobalVocabularyCsv(csv, 'global-vocabulary.csv');
@@ -4660,6 +4851,20 @@ function appendGlobalProblemDetail(container, label, value) {
     valueElement.textContent = String(value ?? '');
     row.append(labelElement, valueElement);
     container.appendChild(row);
+}
+
+function getVocabularyPartOfSpeechLabel(value) {
+    const labels = {
+        noun: '名詞',
+        verb: '動詞',
+        adjective: '形容詞',
+        adverb: '副詞',
+        phrase: '句・フレーズ',
+        preposition: '前置詞',
+        conjunction: '接続詞',
+        other: 'その他'
+    };
+    return labels[value] || '';
 }
 
 function createGlobalProblemReveal(container, entry, field, label, stateSet) {
