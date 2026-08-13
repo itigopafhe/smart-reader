@@ -77,8 +77,7 @@ let readerSettings = { ...DEFAULT_READER_SETTINGS };
 let movingItemId = null;
 let currentModalType = 'word';
 let editingSourceIndex = null;
-let problemPanelState = { id: null, answer: false, explanation: false, memo: false, mode: 'view' };
-let sidePanelMode = 'vocabulary';
+const questionCardRevealState = new Map();
 let readingPositionSaveTimer = null;
 let suppressReadingPositionSave = false;
 let readingPositionRestoreToken = 0;
@@ -99,6 +98,9 @@ let globalSearchState = {
     caseSensitive: false
 };
 let globalVocabularyEditRef = null;
+let globalProblemEditRef = null;
+const QUESTION_TYPES = Object.freeze(['blank', 'choice', 'vocabulary', 'grammar', 'translation', 'reading', 'free', 'sorting', 'true/false', 'other']);
+const QUESTION_RESULTS = Object.freeze(['correct', 'incorrect', 'partial', 'ungraded']);
 let globalVocabularyState = {
     entries: [],
     query: '',
@@ -115,6 +117,22 @@ let globalVocabularyState = {
     contextCollapsedKeys: new Set(),
     contextRevealedMaskKeys: new Set(),
     ankiRevealedKeys: new Set()
+};
+let globalProblemsState = {
+    entries: [],
+    query: '',
+    status: 'all',
+    questionType: 'all',
+    tag: 'all',
+    sourceId: 'all',
+    chapterId: 'all',
+    difficulty: 'all',
+    sort: 'newest',
+    expandedKey: null,
+    historyExpandedKeys: new Set(),
+    answerExpandedKeys: new Set(),
+    explanationExpandedKeys: new Set(),
+    memoExpandedKeys: new Set()
 };
 let readerScrollLockState = null;
 
@@ -1693,10 +1711,6 @@ async function switchToChapter(chapterId, options = {}) {
     await saveToDB();
 
     currentChapterId = target.id;
-    if (sidePanelMode === 'problem') {
-        const openQuestion = getCurrentQuestion();
-        if (!isQuestionInChapter(openQuestion, targetId)) closeProblemPanel(true);
-    }
     renderChapterNavigation();
     renderArticleText();
     reapplyReaderSearchForCurrentContent();
@@ -1789,7 +1803,7 @@ function getQuestionMarkerEntries(paragraphs, chapterId) {
     return byParagraph;
 }
 
-function renderQuestionMarkerText(selected, question, chapterId) {
+function renderQuestionMarkerText(selected, question, chapterId, questionIndex = null) {
     const text = String(selected || '');
     const words = (Array.isArray(currentArticle?.words) ? currentArticle.words : [])
         .filter(word => {
@@ -1814,7 +1828,9 @@ function renderQuestionMarkerText(selected, question, chapterId) {
         cursor = match.index + match.length;
     });
     if (cursor < text.length) content += escapeHtml(text.slice(cursor));
-    return `<span class="question-marker problem-highlight" data-question-id="${escapeHtml(String(question.id))}" data-type="question"><button type="button" class="problem-marker-badge" aria-label="問題を開く" data-question-id="${escapeHtml(String(question.id))}" data-type="question">Q</button><span class="problem-marker-text">${content}</span></span>`;
+    const questionId = hasGlobalProblemId(question.id) ? escapeHtml(String(question.id)) : '';
+    const sourceIndex = Number.isInteger(questionIndex) ? ` data-question-index="${questionIndex}"` : '';
+    return `<span class="question-marker problem-highlight" data-question-id="${questionId}"${sourceIndex} data-type="question"><button type="button" class="problem-marker-badge" aria-label="問題を開く" data-question-id="${questionId}"${sourceIndex} data-type="question">Q</button><span class="problem-marker-text">${content}</span></span>`;
 }
 
 function renderArticleText() {
@@ -1831,7 +1847,7 @@ function renderArticleText() {
         const entries = (questionMarkers.get(index) || []).sort((left, right) => right.start - left.start);
         entries.forEach(entry => {
             const token = `\uE000${questionTokens.length}\uE001`;
-            questionTokens.push({ token, question: entry.question, selected: entry.selected });
+            questionTokens.push({ token, question: entry.question, selected: entry.selected, questionIndex: entry.questionIndex });
             source = source.slice(0, entry.start) + token + source.slice(entry.start + entry.selected.length);
         });
         return `<p data-paragraph-index="${index}">${escapeHtml(source)}</p>`;
@@ -1854,8 +1870,8 @@ function renderArticleText() {
         html = html.replace(new RegExp(`(?<!>)${escaped}(?!<)`, 'gi'), `<span class="word-highlight" data-jump-id="${w.id}" data-type="word">$&</span>`);
     });
 
-    questionTokens.forEach(({ token, question, selected }) => {
-        const marker = renderQuestionMarkerText(selected, question, currentChapterIdForHighlight);
+    questionTokens.forEach(({ token, question, selected, questionIndex }) => {
+        const marker = renderQuestionMarkerText(selected, question, currentChapterIdForHighlight, questionIndex);
         html = html.split(token).join(marker);
     });
 
@@ -1881,9 +1897,10 @@ function handleReaderClick(e) {
         return;
     }
     const questionTarget = target?.closest?.('.problem-marker-badge, .problem-highlight, .question-marker');
-    if (questionTarget?.dataset?.questionId) {
+    if (questionTarget && (hasGlobalProblemId(questionTarget.dataset?.questionId) || questionTarget.dataset?.questionIndex !== undefined)) {
         e.stopPropagation();
-        openProblemPanel(questionTarget.dataset.questionId);
+        const sourceIndex = Number.parseInt(questionTarget.dataset.questionIndex, 10);
+        jumpToResult(questionTarget.dataset.questionId, 'question', Number.isInteger(sourceIndex) ? sourceIndex : null);
         return;
     }
     const existingTarget = target?.closest?.('[data-jump-id]');
@@ -1895,124 +1912,25 @@ function handleReaderClick(e) {
 function handleReaderKeydown(event) {
     if (event?.key !== 'Enter' && event?.key !== ' ') return;
     const target = event.target?.closest ? event.target.closest('.problem-marker-badge, .problem-highlight, .question-marker') : null;
-    if (!target?.dataset?.questionId || hasActiveReaderTextSelection()) return;
+    if (!target || (!hasGlobalProblemId(target.dataset?.questionId) && target.dataset?.questionIndex === undefined) || hasActiveReaderTextSelection()) return;
     event.preventDefault();
-    openProblemPanel(target.dataset.questionId);
+    const sourceIndex = Number.parseInt(target.dataset.questionIndex, 10);
+    jumpToResult(target.dataset.questionId, 'question', Number.isInteger(sourceIndex) ? sourceIndex : null);
 }
 
-function getCurrentQuestion(id = problemPanelState.id) {
-    if (!currentArticle || !Array.isArray(currentArticle.questions)) return null;
-    return currentArticle.questions.find(question => question && String(question.id) === String(id)) || null;
-}
-
-function setProblemPanelField(field, visible) {
-    const question = getCurrentQuestion();
-    if (!question) return;
-    problemPanelState[field] = !!visible;
-    const value = document.getElementById(`problem-panel-${field}`);
-    const toggle = document.getElementById(`problem-${field}-toggle`);
-    if (value) {
-        value.hidden = !visible;
-        value.textContent = String(question[field] || '');
+function jumpToResult(id, type, sourceIndex = null) {
+    const tab = type === 'word' ? 'words' : type === 'note' ? 'notes' : type === 'question' ? 'questions' : null;
+    if (!tab) return;
+    if (type === 'question') {
+        const search = document.getElementById('list-search');
+        if (search) search.value = '';
     }
-    if (toggle) {
-        const label = field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ';
-        toggle.textContent = visible ? `${label}を隠す` : `${label}を見る`;
-    }
-}
-
-function toggleProblemPanelField(field) {
-    setProblemPanelField(field, !problemPanelState[field]);
-}
-
-function renderProblemPanel() {
-    const question = getCurrentQuestion();
-    if (!question) return;
-    document.getElementById('problem-panel-selected').textContent = String(question.selectedText || question.anchor?.selectedText || '');
-    document.getElementById('problem-panel-question').textContent = String(question.question || '');
-    ['answer', 'explanation', 'memo'].forEach(field => setProblemPanelField(field, problemPanelState[field]));
-    document.getElementById('problem-panel-view').hidden = problemPanelState.mode === 'edit';
-    document.getElementById('problem-panel-edit').hidden = problemPanelState.mode !== 'edit';
-}
-
-function setProblemPanelMode(active) {
-    const panelTabs = document.getElementById('panel-tabs');
-    const heading = document.getElementById('problem-panel-heading');
-    const panelControls = document.getElementById('anki-wrapper');
-    const vocabularyStats = document.getElementById('article-vocabulary-statistics');
-    const panelContent = document.getElementById('panel-content');
-    const problemContent = document.getElementById('problem-panel-content');
-    sidePanelMode = active ? 'problem' : 'vocabulary';
-    if (panelTabs) panelTabs.hidden = active;
-    if (heading) heading.hidden = !active;
-    if (panelControls) panelControls.hidden = active;
-    if (vocabularyStats) vocabularyStats.hidden = active;
-    if (panelContent) panelContent.hidden = active;
-    if (problemContent) problemContent.hidden = !active;
-}
-
-function openProblemPanel(id) {
-    const question = getCurrentQuestion(id);
-    if (!question) return;
-    problemPanelState = { id: question.id, answer: false, explanation: false, memo: false, mode: 'view' };
-    setProblemPanelMode(true);
-    renderProblemPanel();
-    document.getElementById('side-panel')?.classList.add('is-open');
-}
-
-function closeProblemPanel(closePanel = true) {
-    setProblemPanelMode(false);
-    problemPanelState = { id: null, answer: false, explanation: false, memo: false, mode: 'view' };
-    if (closePanel) document.getElementById('side-panel')?.classList.remove('is-open');
-}
-
-function editProblemPanel() {
-    const question = getCurrentQuestion();
-    if (!question) return;
-    document.getElementById('problem-edit-selected-text').value = String(question.selectedText || question.anchor?.selectedText || '');
-    document.getElementById('problem-edit-question').value = String(question.question || '');
-    document.getElementById('problem-edit-answer').value = String(question.answer || '');
-    document.getElementById('problem-edit-explanation').value = String(question.explanation || '');
-    document.getElementById('problem-edit-memo').value = String(question.memo || '');
-    problemPanelState.mode = 'edit';
-    renderProblemPanel();
-}
-
-function cancelProblemPanelEdit() {
-    problemPanelState.mode = 'view';
-    renderProblemPanel();
-}
-
-async function saveProblemPanelEdit(event) {
-    event?.preventDefault();
-    const question = getCurrentQuestion();
-    if (!question) return;
-    question.question = document.getElementById('problem-edit-question').value;
-    question.answer = document.getElementById('problem-edit-answer').value;
-    question.explanation = document.getElementById('problem-edit-explanation').value;
-    question.memo = document.getElementById('problem-edit-memo').value;
-    await saveToDB();
-    problemPanelState.mode = 'view';
-    renderProblemPanel();
-    rerenderReaderAtPosition(captureReadingPosition());
-}
-
-async function deleteProblemPanel() {
-    if (!currentArticle || !Array.isArray(currentArticle.questions)) return;
-    if (typeof window.confirm === 'function' && !window.confirm('この問題登録だけを削除しますか？本文は削除されません。')) return;
-    const id = problemPanelState.id;
-    currentArticle.questions = currentArticle.questions.filter(question => String(question?.id) !== String(id));
-    await saveToDB();
-    closeProblemPanel(true);
-    rerenderReaderAtPosition(captureReadingPosition());
-}
-
-function jumpToResult(id, type) {
-    const tab = type === 'word' ? 'words' : 'notes';
     switchTab(tab);
     document.getElementById('side-panel').classList.add('is-open');
     setTimeout(() => {
-        const cardId = `${type}-card-${id}`;
+        const cardId = type === 'question' && !hasGlobalProblemId(id) && Number.isInteger(sourceIndex)
+            ? 'question-card-index-' + sourceIndex
+            : `${type}-card-${id}`;
         const card = document.getElementById(cardId);
         if (card) {
             card.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -2083,25 +2001,254 @@ async function deleteBookmark(id) {
 }
 
 // --- 単語・ノートリスト制御 ---
+function normalizeQuestionType(value) {
+    const type = String(value ?? '').trim();
+    return QUESTION_TYPES.includes(type) ? type : 'other';
+}
+
+function normalizeQuestionTags(value) {
+    const rawTags = Array.isArray(value) ? value : String(value ?? '').split(/[,、]/);
+    return [...new Set(rawTags
+        .flatMap(tag => String(tag ?? '').split(/[,、]/))
+        .map(tag => tag.trim())
+        .filter(Boolean))];
+}
+
+function normalizeQuestionDifficulty(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const difficulty = Number(value);
+    return Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5 ? difficulty : null;
+}
+
+function getQuestionRuntimeMetadata(question) {
+    return {
+        questionType: normalizeQuestionType(question?.questionType),
+        tags: normalizeQuestionTags(question?.tags),
+        difficulty: normalizeQuestionDifficulty(question?.difficulty),
+        needsReview: question?.needsReview === true,
+        attempts: Array.isArray(question?.attempts) ? question.attempts : []
+    };
+}
+
+function getQuestionFormValues() {
+    const getValue = id => document.getElementById(id)?.value ?? '';
+    return {
+        selectedText: String(getValue('input-question-selected-text')),
+        question: getValue('input-question-question'),
+        answer: getValue('input-question-answer'),
+        explanation: getValue('input-question-explanation'),
+        memo: getValue('input-question-memo'),
+        questionType: normalizeQuestionType(getValue('input-question-type')),
+        tags: normalizeQuestionTags(getValue('input-question-tags')),
+        difficulty: normalizeQuestionDifficulty(getValue('input-question-difficulty')),
+        needsReview: document.getElementById('input-question-needs-review')?.checked === true
+    };
+}
+
+function setQuestionFormValues(question) {
+    const metadata = getQuestionRuntimeMetadata(question);
+    document.getElementById('input-question-selected-text').value = question.selectedText || question.anchor?.selectedText || '';
+    document.getElementById('input-question-question').value = question.question || '';
+    document.getElementById('input-question-answer').value = question.answer || '';
+    document.getElementById('input-question-explanation').value = question.explanation || '';
+    document.getElementById('input-question-memo').value = question.memo || '';
+    document.getElementById('input-question-type').value = metadata.questionType;
+    document.getElementById('input-question-tags').value = metadata.tags.join(', ');
+    document.getElementById('input-question-difficulty').value = metadata.difficulty ?? '';
+    document.getElementById('input-question-needs-review').checked = metadata.needsReview;
+}
+
+function createQuestionAttemptId() {
+    return `attempt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatQuestionAttemptDate(value) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp)) return '日時不明';
+    return new Date(timestamp).toLocaleDateString('ja-JP');
+}
+
+function formatQuestionAttemptResult(result) {
+    if (result === 'correct') return '○';
+    if (result === 'incorrect') return '×';
+    if (result === 'partial') return '△';
+    if (result === 'ungraded') return '－';
+    return String(result || '－');
+}
+
+function getQuestionTypeLabel(type) {
+    return {
+        blank: '空欄補充',
+        choice: '選択問題',
+        vocabulary: '語彙',
+        grammar: '文法',
+        translation: '翻訳',
+        reading: '内容一致',
+        free: '自由記述',
+        sorting: '整序',
+        'true/false': '正誤',
+        other: 'その他'
+    }[type] || 'その他';
+}
+
+function getQuestionCardStateKey(id) {
+    return `${currentArticle?.id ?? 'article'}::${String(id)}`;
+}
+
+function getQuestionCardState(id) {
+    const key = getQuestionCardStateKey(id);
+    if (!questionCardRevealState.has(key)) {
+        questionCardRevealState.set(key, { answer: false, explanation: false, memo: false, history: false });
+    }
+    return questionCardRevealState.get(key);
+}
+
+function setQuestionCardField(card, question, field, visible, stateKey = question.id) {
+    const state = getQuestionCardState(stateKey);
+    state[field] = !!visible;
+    const value = card.querySelector(`[data-question-field="${field}"]`);
+    const button = card.querySelector(`[data-question-toggle="${field}"]`);
+    const label = field === 'answer' ? '回答' : field === 'explanation' ? '解説' : 'メモ';
+    if (value) {
+        value.hidden = !state[field];
+        value.textContent = String(question[field] || '');
+    }
+    if (button) button.textContent = state[field] ? `${label}を隠す` : `${label}を見る`;
+}
+
+function setQuestionCardHistory(card, question, visible, stateKey = question.id) {
+    const state = getQuestionCardState(stateKey);
+    state.history = !!visible;
+    const history = card.querySelector('[data-question-history-list]');
+    const button = card.querySelector('[data-question-history]');
+    if (history) history.hidden = !state.history;
+    if (button) button.textContent = state.history ? '履歴を隠す' : '履歴を見る';
+}
+
+async function recordQuestionAttempt(id, sourceIndex, result, event) {
+    event?.stopPropagation();
+    if (!currentArticle || !QUESTION_RESULTS.includes(result)) return;
+    const card = event?.currentTarget?.closest?.('.question-card');
+    const answerInput = card?.querySelector('[data-question-answer-input]');
+    const itemIndex = resolveArticleCollectionIndex(currentArticle.questions, id, sourceIndex);
+    const question = itemIndex >= 0 ? currentArticle.questions[itemIndex] : null;
+    if (!question) return;
+
+    const answeredAt = Date.now();
+    const attempt = {
+        id: createQuestionAttemptId(),
+        userAnswer: String(answerInput?.value ?? ''),
+        result,
+        answeredAt
+    };
+    question.attempts = [...getQuestionRuntimeMetadata(question).attempts, attempt];
+    question.updatedAt = answeredAt;
+    await saveToDB();
+    renderList('questions', document.getElementById('list-search')?.value || '');
+}
+
+async function toggleQuestionNeedsReview(id, sourceIndex, event) {
+    event?.stopPropagation();
+    if (!currentArticle) return;
+    const itemIndex = resolveArticleCollectionIndex(currentArticle.questions, id, sourceIndex);
+    const question = itemIndex >= 0 ? currentArticle.questions[itemIndex] : null;
+    if (!question) return;
+    question.needsReview = !getQuestionRuntimeMetadata(question).needsReview;
+    question.updatedAt = Date.now();
+    await saveToDB();
+    renderList('questions', document.getElementById('list-search')?.value || '');
+}
+
+function renderQuestionCard(card, question, sourceIndex, filter) {
+    const selectedText = question.selectedText || question.anchor?.selectedText || '';
+    const metadata = getQuestionRuntimeMetadata(question);
+    const attempts = metadata.attempts;
+    const latestAttempt = attempts[attempts.length - 1];
+    const cardKey = question.id === undefined ? `index-${sourceIndex}` : question.id;
+    const highlight = value => {
+        const safe = escapeHtml(value);
+        if (!filter) return safe;
+        const escapedFilter = escapeRegExp(escapeHtml(filter));
+        return safe.replace(new RegExp(`(${escapedFilter})`, 'gi'), '<span class="text-highlight">$1</span>');
+    };
+    const tagText = metadata.tags.map(tag => `#${tag}`).join(' ');
+    const typeText = getQuestionTypeLabel(metadata.questionType);
+    const historyMarkup = attempts.length === 0
+        ? '<div class="question-card-history-empty">まだ回答履歴はありません</div>'
+        : attempts.map(attempt => `<div class="question-card-history-item"><span>${formatQuestionAttemptResult(attempt?.result)} ${formatQuestionAttemptDate(attempt?.answeredAt)}</span><span>${escapeHtml(attempt?.userAnswer || '（未入力）')}</span></div>`).join('');
+    card.id = `question-card-${cardKey}`;
+    card.className = 'note-block-card question-card';
+    card.innerHTML = `
+        <div class="question-card-meta"><span>種類: ${escapeHtml(typeText)}</span>${metadata.difficulty === null ? '' : `<span>難易度: ${metadata.difficulty}</span>`}${tagText ? `<span>${escapeHtml(tagText)}</span>` : ''}</div>
+        <div class="question-card-selected"><strong>選択したテキスト</strong><div>${highlight(selectedText)}</div></div>
+        <div class="question-card-question"><strong>問題</strong><div>${highlight(question.question || '')}</div></div>
+        <div class="question-card-reveal"><button type="button" data-question-toggle="answer">回答を見る</button><div class="question-card-hidden" data-question-field="answer" hidden></div></div>
+        <div class="question-card-reveal"><button type="button" data-question-toggle="explanation">解説を見る</button><div class="question-card-hidden" data-question-field="explanation" hidden></div></div>
+        <div class="question-card-reveal"><button type="button" data-question-toggle="memo">メモを見る</button><div class="question-card-hidden" data-question-field="memo" hidden></div></div>
+        <div class="question-card-attempt">
+            <label for="question-answer-${cardKey}">自分の回答</label>
+            <textarea id="question-answer-${cardKey}" data-question-answer-input rows="2" placeholder="回答を入力"></textarea>
+            <div class="question-card-attempt-actions"><button type="button" data-question-attempt="correct">○ 正解</button><button type="button" data-question-attempt="incorrect">× 不正解</button></div>
+        </div>
+        <div class="question-card-history-summary"><span>履歴 ${attempts.length}回${latestAttempt ? ` / 最新: ${formatQuestionAttemptResult(latestAttempt.result)} ${formatQuestionAttemptDate(latestAttempt.answeredAt)}` : ''}</span><button type="button" data-question-history>履歴を見る</button></div>
+        <div class="question-card-history-list" data-question-history-list hidden>${historyMarkup}</div>
+        <div class="question-card-actions"><button type="button" data-question-review>${metadata.needsReview ? '★ 要復習' : '☆ 要復習'}</button><button type="button" data-question-edit>編</button><button type="button" class="del" data-question-delete>消</button></div>`;
+    ['answer', 'explanation', 'memo'].forEach(field => {
+        card.querySelector(`[data-question-toggle="${field}"]`).onclick = event => {
+            event.stopPropagation();
+            const state = getQuestionCardState(cardKey);
+            setQuestionCardField(card, question, field, !state[field], cardKey);
+        };
+        setQuestionCardField(card, question, field, getQuestionCardState(cardKey)[field], cardKey);
+    });
+    ['correct', 'incorrect'].forEach(result => {
+        card.querySelector(`[data-question-attempt="${result}"]`).onclick = event => {
+            void recordQuestionAttempt(question.id, sourceIndex, result, event);
+        };
+    });
+    card.querySelector('[data-question-history]').onclick = event => {
+        event.stopPropagation();
+        const state = getQuestionCardState(cardKey);
+        setQuestionCardHistory(card, question, !state.history, cardKey);
+    };
+    card.querySelector('[data-question-review]').onclick = event => {
+        void toggleQuestionNeedsReview(question.id, sourceIndex, event);
+    };
+    card.querySelector('[data-question-edit]').onclick = event => {
+        event.stopPropagation();
+        editItem(question.id, 'question', sourceIndex);
+    };
+    card.querySelector('[data-question-delete]').onclick = event => {
+        event.stopPropagation();
+        void deleteListItem(question.id, 'questions', sourceIndex);
+    };
+}
+
 function renderList(type, filter = '') {
     const container = document.getElementById('panel-content');
     if (!container || !currentArticle) return;
     container.innerHTML = '';
 
+    const searchControls = document.getElementById('list-search-controls');
+    const vocabularyControls = document.getElementById('vocabulary-controls');
+    if (searchControls) searchControls.hidden = type === 'settings';
+    if (vocabularyControls) vocabularyControls.hidden = type !== 'words';
     if (type === 'settings') { renderSettingsUI(container); return; }
     renderArticleVocabularyStatistics(type);
 
     applyAnkiMaskClass(container, type === 'words' && isAnkiMode, document.getElementById('anki-target-select')?.value);
 
-    const sourceList = type === 'words' ? currentArticle.words : currentArticle.notes;
+    const sourceList = type === 'words' ? (currentArticle.words || []) : type === 'notes' ? (currentArticle.notes || []) : (currentArticle.questions || []);
     let list = sourceList.map((item, sourceIndex) => ({ item, sourceIndex }));
     if (type === 'words' && document.getElementById('hide-memorized-check')?.checked) list = list.filter(entry => !entry.item.memorized);
 
     if (filter) {
         const q = filter.toLowerCase();
-        list = list.filter(({ item }) => type === 'words'
-            ? (item.word + item.meaning + (item.memo || '')).toLowerCase().includes(q)
-            : (item.originalText + item.translation + (item.extra || '')).toLowerCase().includes(q));
+        list = list.filter(({ item }) => {
+            if (type === 'words') return `${item.word || ''} ${item.meaning || ''} ${item.memo || ''}`.toLowerCase().includes(q);
+            if (type === 'notes') return `${item.originalText || ''} ${item.translation || ''} ${item.extra || ''}`.toLowerCase().includes(q);
+            return `${item.selectedText || item.anchor?.selectedText || ''} ${item.question || ''} ${item.answer || ''} ${item.explanation || ''} ${item.memo || ''} ${normalizeQuestionTags(item.tags).join(' ')}`.toLowerCase().includes(q);
+        });
     }
 
     list.forEach(({ item, sourceIndex }) => {
@@ -2128,7 +2275,7 @@ function renderList(type, filter = '') {
                 </div>
                 ${item.memo ? `<div class="memo-row">${highlight(item.memo)}</div>` : ''}
                 <div class="action-group"><button onclick="event.stopPropagation(); editItem(${itemIdArgument}, 'word', ${sourceIndex})">編</button><button onclick="event.stopPropagation(); deleteListItem(${itemIdArgument}, 'words', ${sourceIndex})">消</button></div>`;
-        } else {
+        } else if (type === 'notes') {
             card.id = `note-card-${item.id}`;
             card.className = 'note-block-card';
             card.innerHTML = `
@@ -2136,6 +2283,8 @@ function renderList(type, filter = '') {
                 <hr class="note-divider"><div class="block-memo">${highlight(item.translation)}</div>
                 ${item.extra ? `<div class="block-extra">💡 ${highlight(item.extra)}</div>` : ''}
                 <div class="note-footer"><button onclick="editItem(${itemIdArgument}, 'note', ${sourceIndex})">編</button><button onclick="deleteListItem(${itemIdArgument}, 'notes', ${sourceIndex})">消</button></div>`;
+        } else {
+            renderQuestionCard(card, item, sourceIndex, filter);
         }
         container.appendChild(card);
     });
@@ -2148,24 +2297,40 @@ async function handleUnifiedSave(e) {
         await saveGlobalVocabularyWordFromModal();
         return;
     }
-    if (!currentArticle) return;
-    const readingPosition = rememberReadingPosition();
+    const savingGlobalProblem = currentModalType === 'question' && !!globalProblemEditRef;
+    const targetArticle = savingGlobalProblem
+        ? libraryItems.find(item => item?.type === 'article' && globalIdsEqual(item.id, globalProblemEditRef.articleId))
+        : currentArticle;
+    if (!targetArticle) return;
+    const readingPosition = currentArticle ? rememberReadingPosition() : null;
     try {
         if (currentModalType === 'question') {
-            const activeChapterId = getActiveChapterIdForItem();
-            const selected = document.getElementById('input-question-selected-text').value.trim();
-            const question = {
-                id: Date.now(),
-                selectedText: selected,
-                question: document.getElementById('input-question-question').value,
-                answer: document.getElementById('input-question-answer').value,
-                explanation: document.getElementById('input-question-explanation').value,
-                memo: document.getElementById('input-question-memo').value,
-                createdAt: Date.now()
-            };
-            if (activeChapterId) question.chapterId = activeChapterId;
-            if (selectedReaderCapture?.anchor && selected === selectedReaderCapture.anchor.selectedText) question.anchor = selectedReaderCapture.anchor;
-            currentArticle.questions.push(question);
+            const activeChapterId = targetArticle === currentArticle ? getActiveChapterIdForItem() : null;
+            const now = Date.now();
+            const values = getQuestionFormValues();
+            ensureArticleCollections(targetArticle);
+            const questionId = savingGlobalProblem ? globalProblemEditRef.questionId : editingId;
+            const questionSourceIndex = savingGlobalProblem ? globalProblemEditRef.sourceIndex : editingSourceIndex;
+            const editIndex = resolveArticleCollectionIndex(targetArticle.questions, questionId, questionSourceIndex);
+            if (editIndex >= 0) {
+                targetArticle.questions = targetArticle.questions.map((item, index) => {
+                    if (index !== editIndex) return item;
+                    const updated = Object.assign({}, item, values, { updatedAt: now });
+                    if ((updated.chapterId === undefined || updated.chapterId === null) && activeChapterId) updated.chapterId = activeChapterId;
+                    return updated;
+                });
+            } else {
+                const question = {
+                    id: now,
+                    ...values,
+                    attempts: [],
+                    createdAt: now,
+                    updatedAt: now
+                };
+                if (activeChapterId) question.chapterId = activeChapterId;
+                if (selectedReaderCapture?.anchor && values.selectedText === selectedReaderCapture.anchor.selectedText) question.anchor = selectedReaderCapture.anchor;
+                targetArticle.questions.push(question);
+            }
         } else if (currentModalType === 'word') {
             const activeChapterId = getActiveChapterIdForItem();
             const values = {
@@ -2216,6 +2381,11 @@ async function handleUnifiedSave(e) {
         }
         await saveToDB();
         closeModal();
+        if (savingGlobalProblem) {
+            globalProblemsState.entries = collectGlobalProblems();
+            renderGlobalProblems();
+            return;
+        }
         rerenderReaderAtPosition(readingPosition);
         renderList(currentTab, document.getElementById('list-search').value);
     } catch (err) { console.error(err); }
@@ -2246,7 +2416,7 @@ function resolveArticleCollectionIndex(collection, id, sourceIndex) {
 
 function editItem(id, type, sourceIndex = null) {
     globalVocabularyEditRef = null;
-    const collection = type === 'word' ? currentArticle.words : currentArticle.notes;
+    const collection = type === 'word' ? currentArticle.words : type === 'note' ? currentArticle.notes : currentArticle.questions;
     const itemIndex = resolveArticleCollectionIndex(collection, id, sourceIndex);
     const item = itemIndex >= 0 ? collection[itemIndex] : null;
     if (!item) return;
@@ -2258,10 +2428,12 @@ function editItem(id, type, sourceIndex = null) {
         document.getElementById('input-word-meaning').value = item.meaning;
         document.getElementById('input-word-memo').value = item.memo || '';
         document.getElementById('input-word-context').value = item.context || '';
-    } else {
+    } else if (type === 'note') {
         document.getElementById('input-note-eng').value = item.originalText;
         document.getElementById('input-note-trans').value = item.translation;
         document.getElementById('input-note-extra').value = item.extra || '';
+    } else {
+        setQuestionFormValues(item);
     }
     showUnifiedModal();
 }
@@ -2289,6 +2461,10 @@ function openUnifiedModal() {
     document.getElementById('input-question-answer').value = "";
     document.getElementById('input-question-explanation').value = "";
     document.getElementById('input-question-memo').value = "";
+    document.getElementById('input-question-type').value = 'other';
+    document.getElementById('input-question-tags').value = '';
+    document.getElementById('input-question-difficulty').value = '';
+    document.getElementById('input-question-needs-review').checked = false;
 
     // デフォルトで「単語」タブを選択状態にする
     switchModalType('word');
@@ -2535,7 +2711,7 @@ function flushReadingPositionSave() {
 }
 
 async function saveToDB() { await db.setItem('library_items', libraryItems); }
-function hideAllSections() { ['library-section', 'vocabulary-section', 'input-area', 'import-review-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
+function hideAllSections() { ['library-section', 'vocabulary-section', 'problems-section', 'input-area', 'import-review-area', 'reader-wrapper', 'back-to-library', 'article-meta'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = 'none'; }); }
 function lockReaderScrollForModal() {
     const display = document.getElementById('text-display');
     if (!display || !currentArticle || readerScrollLockState) return;
@@ -2563,17 +2739,13 @@ function closeModal() {
     editingId = null;
     editingSourceIndex = null;
     globalVocabularyEditRef = null;
+    globalProblemEditRef = null;
     selectedReaderCapture = null;
 }
 function togglePanel() {
     const panel = document.getElementById('side-panel');
     if (!panel) return;
     const opening = !panel.classList.contains('is-open');
-    if (!opening && sidePanelMode === 'problem') {
-        closeProblemPanel(true);
-        updateMobilePanelSizeButton();
-        return;
-    }
     panel.classList.toggle('is-open');
     if (opening) panel.classList.remove('is-expanded');
     updateMobilePanelSizeButton();
@@ -2732,20 +2904,23 @@ async function deleteLibraryItem(id) { if(confirm("削除しますか？")){ lib
 async function deleteListItem(id, type, sourceIndex = null) {
     if (!confirm("消去しますか？")) return;
     const readingPosition = rememberReadingPosition();
-    const collection = type === 'words' ? currentArticle.words : currentArticle.notes;
+    const collection = type === 'words' ? currentArticle.words : type === 'notes' ? currentArticle.notes : currentArticle.questions;
     const itemIndex = resolveArticleCollectionIndex(collection, id, sourceIndex);
     if (itemIndex < 0) return;
+    if (type === 'questions') {
+        const question = collection[itemIndex];
+        const stateKey = question?.id === undefined ? `index-${itemIndex}` : question.id;
+        questionCardRevealState.delete(getQuestionCardStateKey(stateKey));
+    }
     collection.splice(itemIndex, 1);
     await saveToDB();
     renderList(type);
     rerenderReaderAtPosition(readingPosition);
 }
 function switchTab(t) {
-    if (sidePanelMode === 'problem') closeProblemPanel(false);
     currentTab = t;
-    document.getElementById('anki-wrapper').style.display = t === 'settings' ? 'none' : 'block';
-    document.querySelectorAll('.tab-btn').forEach((button, index) => button.classList.toggle('active', (index === 0 && t === 'words') || (index === 1 && t === 'notes') || (index === 2 && t === 'settings')));
-    renderList(t);
+    document.querySelectorAll('.tab-btn').forEach(button => button.classList.toggle('active', button.dataset.tab === t));
+    renderList(t, document.getElementById('list-search')?.value || '');
 }
 function openMoveModal(id) { movingItemId = id; const item = libraryItems.find(i => i.id === id); if(!item) return; document.getElementById('move-target-name').innerText = item.name; const s = document.getElementById('move-select'); s.innerHTML = '<option value="">🏠 Root</option>'; libraryItems.filter(i=>i.type==='folder'&&i.id!==id).forEach(f=>{ const o=document.createElement('option'); o.value=f.id; o.innerText=f.name; s.appendChild(o); }); document.getElementById('move-modal-overlay').classList.add('show'); }
 async function submitMove() { if(!movingItemId) return; const val = document.getElementById('move-select').value; const pid = val?parseInt(val):null; const item = libraryItems.find(i=>i.id===movingItemId); if(item){ item.parentId=pid; await saveToDB(); document.getElementById('move-modal-overlay').classList.remove('show'); showLibrary(); } }
@@ -2969,7 +3144,7 @@ function showSmartReaderRestorePreview() {
     setRestorePreviewText('backup-restore-date', Number.isNaN(exportedDate.getTime())
         ? '作成日時: 不明'
         : `作成日時: ${exportedDate.toLocaleString('ja-JP')}`);
-    ['articles', 'folders', 'chapters', 'words', 'notes', 'bookmarks'].forEach(key => {
+    ['articles', 'folders', 'chapters', 'words', 'notes', 'bookmarks', 'questions'].forEach(key => {
         setRestorePreviewText(`backup-count-${key}`, counts[key] || 0);
     });
     const status = document.getElementById('backup-restore-status');
@@ -4223,4 +4398,566 @@ function exportGlobalVocabularyCSV() {
     ]);
     const csv = [header, ...rows].map(row => row.map(globalCsvValue).join(',')).join('\r\n') + '\r\n';
     downloadGlobalVocabularyCsv(csv, 'global-vocabulary.csv');
+}
+
+// --- Global Problems ------------------------------------------------------
+// Global ProblemsはLocalForageに専用コピーを作らず、各article.questionsから
+// 画面表示用のruntime entryを毎回構築する。
+function hasGlobalProblemId(questionId) {
+    return questionId !== undefined && questionId !== null && questionId !== '';
+}
+
+function getGlobalProblemChapterInfo(article, question) {
+    const chapter = getGlobalChapterInfo(article, question);
+    if (chapter.id !== '') return chapter;
+    if (!hasStoredChapters(article)) return { id: 'legacy-main', title: '本文' };
+    const firstChapter = getArticleChapters(article)[0];
+    if (firstChapter) return { id: firstChapter.id, title: firstChapter.title };
+    return chapter;
+}
+
+function collectGlobalProblems() {
+    let sequence = 0;
+    const entries = [];
+    libraryItems
+        .filter(item => item && item.type === 'article')
+        .forEach(article => {
+            const questions = Array.isArray(article.questions) ? article.questions : [];
+            questions.forEach((question, sourceIndex) => {
+                if (!question || typeof question !== 'object') return;
+                const metadata = getQuestionRuntimeMetadata(question);
+                const chapter = getGlobalProblemChapterInfo(article, question);
+                const questionId = question.id;
+                const key = hasGlobalProblemId(questionId)
+                    ? `${String(article.id)}::id::${String(questionId)}`
+                    : `${String(article.id)}::index::${String(sourceIndex)}`;
+                entries.push({
+                    key,
+                    articleId: article.id,
+                    articleTitle: getGlobalArticleTitle(article),
+                    chapterId: chapter.id,
+                    chapterTitle: chapter.title,
+                    chapterKey: chapter.id === '' ? '' : `${String(article.id)}::${String(chapter.id)}`,
+                    questionId,
+                    sourceIndex,
+                    selectedText: String(question.selectedText || question.anchor?.selectedText || ''),
+                    question: String(question.question || ''),
+                    answer: String(question.answer || ''),
+                    explanation: String(question.explanation || ''),
+                    memo: String(question.memo || ''),
+                    questionType: metadata.questionType,
+                    tags: metadata.tags,
+                    difficulty: metadata.difficulty,
+                    needsReview: metadata.needsReview,
+                    attempts: metadata.attempts,
+                    createdAt: question.createdAt,
+                    updatedAt: question.updatedAt ?? question.createdAt ?? null,
+                    sequence: sequence++
+                });
+            });
+        });
+    return entries;
+}
+
+function findGlobalProblemEntry(key) {
+    return globalProblemsState.entries.find(entry => entry.key === String(key)) || null;
+}
+
+function resolveGlobalProblemSourceIndex(questions, questionId, sourceIndex) {
+    if (!Array.isArray(questions)) return -1;
+    if (hasGlobalProblemId(questionId)) {
+        return questions.findIndex(question => question && globalIdsEqual(question.id, questionId));
+    }
+    return Number.isInteger(sourceIndex) && questions[sourceIndex] ? sourceIndex : -1;
+}
+
+function getGlobalProblemEntrySource(entry) {
+    if (!entry) return null;
+    const article = libraryItems.find(item => item?.type === 'article' && globalIdsEqual(item.id, entry.articleId));
+    if (!article) return null;
+    ensureArticleCollections(article);
+    const index = resolveGlobalProblemSourceIndex(article.questions, entry.questionId, entry.sourceIndex);
+    if (index < 0 || !article.questions[index]) return null;
+    return { article, question: article.questions[index], index };
+}
+
+function getGlobalProblemAttemptSummary(attempts) {
+    const list = Array.isArray(attempts) ? attempts : [];
+    let correctCount = 0;
+    let incorrectCount = 0;
+    let partialCount = 0;
+    let latestAttempt = null;
+    let latestTimestamp = -1;
+    list.forEach((attempt, index) => {
+        if (attempt?.result === 'correct') correctCount += 1;
+        if (attempt?.result === 'incorrect') incorrectCount += 1;
+        if (attempt?.result === 'partial') partialCount += 1;
+        const timestamp = getGlobalCreatedTimestamp(attempt?.answeredAt);
+        if (timestamp > latestTimestamp || (timestamp === latestTimestamp && latestAttempt === null)) {
+            latestTimestamp = timestamp;
+            latestAttempt = attempt;
+        } else if (timestamp === latestTimestamp && latestAttempt !== null) {
+            // 同時刻の履歴は配列後方を最新として扱う。
+            const latestIndex = list.indexOf(latestAttempt);
+            if (index > latestIndex) latestAttempt = attempt;
+        }
+    });
+    const gradedCount = correctCount + incorrectCount + partialCount;
+    return {
+        attemptCount: list.length,
+        correctCount,
+        incorrectCount,
+        gradedCount,
+        accuracy: gradedCount > 0 ? correctCount / gradedCount : null,
+        latestAttempt,
+        lastAnsweredAt: latestAttempt?.answeredAt ?? null
+    };
+}
+
+function getGlobalProblemAttemptMark(attempt) {
+    return formatQuestionAttemptResult(attempt?.result);
+}
+
+function formatGlobalProblemAccuracy(summary) {
+    return summary.accuracy === null ? '未挑戦' : `${Math.round(summary.accuracy * 100)}%`;
+}
+
+function getFilteredGlobalProblems() {
+    const state = globalProblemsState;
+    const query = String(state.query || '').trim().toLocaleLowerCase();
+    let entries = state.entries.filter(entry => {
+        const summary = getGlobalProblemAttemptSummary(entry.attempts);
+        if (state.status === 'unattempted' && summary.attemptCount !== 0) return false;
+        if (state.status === 'answered' && summary.attemptCount === 0) return false;
+        if (state.status === 'latestCorrect' && summary.latestAttempt?.result !== 'correct') return false;
+        if (state.status === 'latestIncorrect' && summary.latestAttempt?.result !== 'incorrect') return false;
+        if (state.status === 'everIncorrect' && summary.incorrectCount === 0) return false;
+        if (state.status === 'needsReview' && !entry.needsReview) return false;
+        if (state.questionType !== 'all' && entry.questionType !== state.questionType) return false;
+        if (state.tag !== 'all' && !entry.tags.includes(state.tag)) return false;
+        if (state.sourceId !== 'all' && String(entry.articleId) !== String(state.sourceId)) return false;
+        if (state.chapterId !== 'all' && entry.chapterKey !== state.chapterId) return false;
+        if (state.difficulty === 'unset' && entry.difficulty !== null) return false;
+        if (state.difficulty !== 'all' && state.difficulty !== 'unset' && String(entry.difficulty) !== String(state.difficulty)) return false;
+        if (!query) return true;
+        return [
+            entry.selectedText,
+            entry.question,
+            entry.answer,
+            entry.explanation,
+            entry.memo,
+            ...entry.tags,
+            entry.articleTitle,
+            entry.chapterTitle
+        ].some(value => String(value ?? '').toLocaleLowerCase().includes(query));
+    });
+
+    const createdTimestamp = entry => getGlobalCreatedTimestamp(entry.createdAt);
+    const recentTimestamp = entry => getGlobalProblemAttemptSummary(entry.attempts).lastAnsweredAt
+        ? getGlobalCreatedTimestamp(getGlobalProblemAttemptSummary(entry.attempts).lastAnsweredAt)
+        : 0;
+    entries.sort((left, right) => {
+        const leftCreated = createdTimestamp(left);
+        const rightCreated = createdTimestamp(right);
+        if (state.sort === 'oldest') return leftCreated - rightCreated || left.sequence - right.sequence;
+        if (state.sort === 'recentAnswered') {
+            const leftAnswered = recentTimestamp(left);
+            const rightAnswered = recentTimestamp(right);
+            if (leftAnswered === 0 && rightAnswered !== 0) return 1;
+            if (leftAnswered !== 0 && rightAnswered === 0) return -1;
+            return rightAnswered - leftAnswered || rightCreated - leftCreated || left.sequence - right.sequence;
+        }
+        if (state.sort === 'mostIncorrect') {
+            const leftIncorrect = getGlobalProblemAttemptSummary(left.attempts).incorrectCount;
+            const rightIncorrect = getGlobalProblemAttemptSummary(right.attempts).incorrectCount;
+            return rightIncorrect - leftIncorrect || rightCreated - leftCreated || left.sequence - right.sequence;
+        }
+        if (state.sort === 'lowestAccuracy') {
+            const leftAccuracy = getGlobalProblemAttemptSummary(left.attempts).accuracy;
+            const rightAccuracy = getGlobalProblemAttemptSummary(right.attempts).accuracy;
+            if (leftAccuracy === null && rightAccuracy !== null) return 1;
+            if (leftAccuracy !== null && rightAccuracy === null) return -1;
+            return (leftAccuracy ?? 0) - (rightAccuracy ?? 0) || rightCreated - leftCreated || left.sequence - right.sequence;
+        }
+        return rightCreated - leftCreated || left.sequence - right.sequence;
+    });
+    return entries;
+}
+
+function getGlobalProblemsStatistics(entries = globalProblemsState.entries) {
+    const statistics = { total: entries.length, unattempted: 0, latestCorrect: 0, latestIncorrect: 0, needsReview: 0 };
+    entries.forEach(entry => {
+        const summary = getGlobalProblemAttemptSummary(entry.attempts);
+        if (summary.attemptCount === 0) statistics.unattempted += 1;
+        if (summary.latestAttempt?.result === 'correct') statistics.latestCorrect += 1;
+        if (summary.latestAttempt?.result === 'incorrect') statistics.latestIncorrect += 1;
+        if (entry.needsReview) statistics.needsReview += 1;
+    });
+    return statistics;
+}
+
+function appendGlobalProblemOption(select, value, label) {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = label;
+    select.appendChild(option);
+}
+
+function renderGlobalProblemsControls() {
+    const state = globalProblemsState;
+    const tagSelect = document.getElementById('global-problems-tag');
+    const sourceSelect = document.getElementById('global-problems-source');
+    const chapterSelect = document.getElementById('global-problems-chapter');
+    if (!tagSelect || !sourceSelect || !chapterSelect) return;
+
+    tagSelect.innerHTML = '';
+    appendGlobalProblemOption(tagSelect, 'all', 'すべてのタグ');
+    const tags = Array.from(new Set(state.entries.flatMap(entry => entry.tags))).sort((left, right) => left.localeCompare(right, 'ja'));
+    tags.forEach(tag => appendGlobalProblemOption(tagSelect, tag, tag));
+    if (!tags.includes(state.tag)) state.tag = 'all';
+    tagSelect.value = state.tag;
+
+    sourceSelect.innerHTML = '';
+    appendGlobalProblemOption(sourceSelect, 'all', 'すべての記事・書籍');
+    const articles = libraryItems.filter(item => item?.type === 'article');
+    articles.forEach(article => appendGlobalProblemOption(sourceSelect, article.id, getGlobalArticleTitle(article)));
+    if (!articles.some(article => String(article.id) === String(state.sourceId))) state.sourceId = 'all';
+    sourceSelect.value = String(state.sourceId);
+
+    chapterSelect.innerHTML = '';
+    appendGlobalProblemOption(chapterSelect, 'all', 'すべての章');
+    const chapters = [];
+    articles
+        .filter(article => state.sourceId === 'all' || String(article.id) === String(state.sourceId))
+        .forEach(article => getArticleChapters(article).forEach(chapter => {
+            const chapterKey = `${String(article.id)}::${String(chapter.id)}`;
+            if (!chapters.some(item => item.key === chapterKey)) chapters.push({ key: chapterKey, title: `${getGlobalArticleTitle(article)} / ${chapter.title}` });
+        }));
+    chapters.forEach(chapter => appendGlobalProblemOption(chapterSelect, chapter.key, chapter.title));
+    if (!chapters.some(chapter => chapter.key === state.chapterId)) state.chapterId = 'all';
+    chapterSelect.value = state.chapterId;
+
+    const query = document.getElementById('global-problems-search');
+    const status = document.getElementById('global-problems-status');
+    const type = document.getElementById('global-problems-type');
+    const difficulty = document.getElementById('global-problems-difficulty');
+    const sort = document.getElementById('global-problems-sort');
+    if (query) query.value = state.query;
+    if (status) status.value = state.status;
+    if (type) type.value = state.questionType;
+    if (difficulty) difficulty.value = state.difficulty;
+    if (sort) sort.value = state.sort;
+}
+
+function appendGlobalProblemDetail(container, label, value) {
+    const row = document.createElement('div');
+    row.className = 'global-problem-detail-row';
+    const labelElement = document.createElement('span');
+    labelElement.className = 'global-problem-detail-label';
+    labelElement.textContent = label;
+    const valueElement = document.createElement('span');
+    valueElement.className = 'global-problem-detail-value';
+    valueElement.textContent = String(value ?? '');
+    row.append(labelElement, valueElement);
+    container.appendChild(row);
+}
+
+function createGlobalProblemReveal(container, entry, field, label, stateSet) {
+    const group = document.createElement('div');
+    group.className = 'global-problem-reveal-group';
+    const button = document.createElement('button');
+    button.type = 'button';
+    const value = document.createElement('div');
+    value.className = 'global-problem-hidden-value';
+    const revealed = stateSet.has(entry.key);
+    button.textContent = revealed ? `${label}を隠す` : `${label}を見る`;
+    value.textContent = entry[field];
+    value.hidden = !revealed;
+    button.onclick = event => {
+        event.stopPropagation();
+        if (stateSet.has(entry.key)) stateSet.delete(entry.key);
+        else stateSet.add(entry.key);
+        renderGlobalProblems();
+    };
+    group.append(button, value);
+    container.appendChild(group);
+}
+
+function createGlobalProblemHistory(container, entry, summary) {
+    const historyButton = document.createElement('button');
+    historyButton.type = 'button';
+    historyButton.className = 'small-btn';
+    const expanded = globalProblemsState.historyExpandedKeys.has(entry.key);
+    historyButton.textContent = expanded ? '履歴を隠す' : `履歴を見る（${summary.attemptCount}回）`;
+    historyButton.onclick = event => {
+        event.stopPropagation();
+        if (expanded) globalProblemsState.historyExpandedKeys.delete(entry.key);
+        else globalProblemsState.historyExpandedKeys.add(entry.key);
+        renderGlobalProblems();
+    };
+    container.appendChild(historyButton);
+    if (!expanded) return;
+
+    const history = document.createElement('div');
+    history.className = 'global-problem-history';
+    const attempts = [...entry.attempts].sort((left, right) => getGlobalCreatedTimestamp(right?.answeredAt) - getGlobalCreatedTimestamp(left?.answeredAt));
+    attempts.forEach(attempt => {
+        const item = document.createElement('div');
+        item.className = 'global-problem-history-item';
+        const result = document.createElement('strong');
+        result.textContent = `${formatGlobalVocabularyDate(attempt?.answeredAt) || '日時不明'} ${getGlobalProblemAttemptMark(attempt)}`;
+        const answer = document.createElement('span');
+        answer.textContent = `自分の回答：${String(attempt?.userAnswer || '（未入力）')}`;
+        item.append(result, answer);
+        history.appendChild(item);
+    });
+    container.appendChild(history);
+}
+
+function createGlobalProblemCard(entry) {
+    const summary = getGlobalProblemAttemptSummary(entry.attempts);
+    const card = document.createElement('article');
+    const expanded = globalProblemsState.expandedKey === entry.key;
+    card.className = `global-problem-card${expanded ? ' is-expanded' : ''}`;
+    card.setAttribute('aria-expanded', String(expanded));
+    card.addEventListener('click', event => {
+        if (event.target.closest('button, input, select, textarea, a')) return;
+        globalProblemsState.expandedKey = expanded ? null : entry.key;
+        renderGlobalProblems();
+    });
+
+    const meta = document.createElement('div');
+    meta.className = 'global-problem-meta';
+    const type = document.createElement('span');
+    type.className = 'global-problem-chip';
+    type.textContent = getQuestionTypeLabel(entry.questionType);
+    meta.appendChild(type);
+    entry.tags.forEach(tag => {
+        const tagElement = document.createElement('span');
+        tagElement.className = 'global-problem-chip';
+        tagElement.textContent = `#${tag}`;
+        meta.appendChild(tagElement);
+    });
+    const reviewButton = document.createElement('button');
+    reviewButton.type = 'button';
+    reviewButton.className = 'global-problem-review';
+    reviewButton.textContent = entry.needsReview ? '★ 要復習' : '☆ 要復習';
+    reviewButton.title = entry.needsReview ? '要復習を解除' : '要復習にする';
+    reviewButton.onclick = event => void toggleGlobalProblemNeedsReview(entry.key, event);
+    meta.appendChild(reviewButton);
+    card.appendChild(meta);
+
+    const selected = document.createElement('div');
+    selected.className = 'global-problem-selected';
+    selected.textContent = entry.selectedText || '選択テキストなし';
+    card.appendChild(selected);
+    const question = document.createElement('div');
+    question.className = 'global-problem-question';
+    question.textContent = entry.question || '問題文なし';
+    card.appendChild(question);
+
+    const source = document.createElement('div');
+    source.className = 'global-problem-source';
+    source.textContent = `${entry.articleTitle}${entry.chapterTitle ? ` / ${entry.chapterTitle}` : ''}`;
+    card.appendChild(source);
+
+    const progress = document.createElement('div');
+    progress.className = 'global-problem-progress';
+    progress.textContent = `${summary.attemptCount}回 | ○${summary.correctCount} ×${summary.incorrectCount} | ${formatGlobalProblemAccuracy(summary)} | 最新 ${summary.latestAttempt ? getGlobalProblemAttemptMark(summary.latestAttempt) : '－'}${summary.lastAnsweredAt ? ` ${formatGlobalVocabularyDate(summary.lastAnsweredAt)}` : ''}`;
+    card.appendChild(progress);
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'global-problem-expand-toggle';
+    toggle.textContent = expanded ? '詳細を隠す' : '詳細を見る';
+    toggle.onclick = event => {
+        event.stopPropagation();
+        globalProblemsState.expandedKey = expanded ? null : entry.key;
+        renderGlobalProblems();
+    };
+    card.appendChild(toggle);
+
+    if (!expanded) return card;
+
+    const details = document.createElement('div');
+    details.className = 'global-problem-details';
+    appendGlobalProblemDetail(details, '問題種類', getQuestionTypeLabel(entry.questionType));
+    appendGlobalProblemDetail(details, 'タグ', entry.tags.join(', '));
+    appendGlobalProblemDetail(details, '難易度', entry.difficulty === null ? '未設定' : entry.difficulty);
+    appendGlobalProblemDetail(details, '選択範囲', entry.selectedText);
+    createGlobalProblemReveal(details, entry, 'answer', '回答', globalProblemsState.answerExpandedKeys);
+    createGlobalProblemReveal(details, entry, 'explanation', '解説', globalProblemsState.explanationExpandedKeys);
+    createGlobalProblemReveal(details, entry, 'memo', 'メモ', globalProblemsState.memoExpandedKeys);
+    createGlobalProblemHistory(details, entry, summary);
+
+    const actions = document.createElement('div');
+    actions.className = 'global-problem-actions';
+    const openButton = document.createElement('button');
+    openButton.type = 'button';
+    openButton.className = 'small-btn';
+    openButton.textContent = '本文で開く';
+    openButton.onclick = event => {
+        event.stopPropagation();
+        openGlobalProblemEntry(entry.key);
+    };
+    const editButton = document.createElement('button');
+    editButton.type = 'button';
+    editButton.className = 'small-btn';
+    editButton.textContent = '編集';
+    editButton.onclick = event => {
+        event.stopPropagation();
+        openGlobalProblemEditor(entry.key);
+    };
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'small-btn del';
+    deleteButton.textContent = '削除';
+    deleteButton.onclick = event => {
+        event.stopPropagation();
+        void deleteGlobalProblem(entry.key);
+    };
+    actions.append(openButton, editButton, deleteButton);
+    details.appendChild(actions);
+    card.appendChild(details);
+    return card;
+}
+
+function renderGlobalProblems() {
+    const container = document.getElementById('global-problems-list');
+    if (!container) return;
+    renderGlobalProblemsControls();
+    const entries = getFilteredGlobalProblems();
+    const total = globalProblemsState.entries.length;
+    const count = document.getElementById('global-problems-count');
+    if (count) count.textContent = entries.length === total ? `${total.toLocaleString()} problems` : `${entries.length.toLocaleString()} / ${total.toLocaleString()} problems`;
+    const statistics = getGlobalProblemsStatistics(entries);
+    const statisticsTarget = document.getElementById('global-problems-statistics');
+    if (statisticsTarget) statisticsTarget.textContent = `未挑戦 ${statistics.unattempted} | 最新○ ${statistics.latestCorrect} | 最新× ${statistics.latestIncorrect} | 要復習 ${statistics.needsReview}`;
+    container.innerHTML = '';
+    if (entries.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'global-problems-empty';
+        empty.textContent = total === 0 ? '登録された問題はありません。' : '条件に一致する問題はありません。';
+        container.appendChild(empty);
+        return;
+    }
+    entries.forEach(entry => container.appendChild(createGlobalProblemCard(entry)));
+}
+
+function showGlobalProblems() {
+    flushReadingPositionSave();
+    hideAllSections();
+    document.getElementById('side-panel')?.classList.remove('is-open');
+    document.getElementById('add-btn').style.display = 'none';
+    document.getElementById('fab-toggle').style.display = 'none';
+    const section = document.getElementById('problems-section');
+    if (!section) return;
+    section.style.display = 'block';
+    globalProblemsState.entries = collectGlobalProblems();
+    renderGlobalProblems();
+}
+
+function updateGlobalProblems(field, value) {
+    if (field === 'query') globalProblemsState.query = String(value || '');
+    if (field === 'status') globalProblemsState.status = value;
+    if (field === 'questionType') globalProblemsState.questionType = value;
+    if (field === 'tag') globalProblemsState.tag = value;
+    if (field === 'sourceId') {
+        globalProblemsState.sourceId = value;
+        globalProblemsState.chapterId = 'all';
+    }
+    if (field === 'chapterId') globalProblemsState.chapterId = value;
+    if (field === 'difficulty') globalProblemsState.difficulty = value;
+    if (field === 'sort') globalProblemsState.sort = value;
+    renderGlobalProblems();
+}
+
+async function toggleGlobalProblemNeedsReview(key, event) {
+    event?.stopPropagation();
+    const entry = findGlobalProblemEntry(key);
+    const source = getGlobalProblemEntrySource(entry);
+    if (!source) return;
+    source.question.needsReview = !getQuestionRuntimeMetadata(source.question).needsReview;
+    source.question.updatedAt = Date.now();
+    await saveToDB();
+    globalProblemsState.entries = collectGlobalProblems();
+    renderGlobalProblems();
+}
+
+function openGlobalProblemEditor(key) {
+    const entry = findGlobalProblemEntry(key);
+    const source = getGlobalProblemEntrySource(entry);
+    if (!entry || !source) return;
+    globalVocabularyEditRef = null;
+    globalProblemEditRef = {
+        articleId: source.article.id,
+        questionId: entry.questionId,
+        sourceIndex: entry.sourceIndex
+    };
+    editingId = source.question.id;
+    editingSourceIndex = source.index;
+    switchModalType('question');
+    setQuestionFormValues(source.question);
+    showUnifiedModal();
+}
+
+async function deleteGlobalProblem(key) {
+    const entry = findGlobalProblemEntry(key);
+    const source = getGlobalProblemEntrySource(entry);
+    if (!source || !confirm('この問題を削除しますか？本文は削除されません。')) return;
+    source.article.questions.splice(source.index, 1);
+    await saveToDB();
+    globalProblemsState.expandedKey = null;
+    globalProblemsState.historyExpandedKeys.delete(key);
+    globalProblemsState.answerExpandedKeys.delete(key);
+    globalProblemsState.explanationExpandedKeys.delete(key);
+    globalProblemsState.memoExpandedKeys.delete(key);
+    globalProblemsState.entries = collectGlobalProblems();
+    renderGlobalProblems();
+}
+
+function flashGlobalProblemAnchor(resolution, question) {
+    const display = document.getElementById('text-display');
+    const paragraph = display?.querySelector(`p[data-paragraph-index="${resolution.paragraphIndex}"]`);
+    if (!paragraph) return false;
+    paragraph.classList.add('temporary-reader-anchor');
+    const questionId = question?.id;
+    const target = Array.from(paragraph.querySelectorAll('[data-question-id]')).find(element =>
+        String(element.dataset.questionId) === String(questionId));
+    const highlight = target || paragraph;
+    highlight.classList.add('temporary-reader-highlight');
+    paragraph.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => {
+        paragraph.classList.remove('temporary-reader-anchor');
+        highlight.classList.remove('temporary-reader-highlight');
+    }, 2500);
+    return true;
+}
+
+function openGlobalProblemEntry(key) {
+    const entry = findGlobalProblemEntry(key);
+    const source = getGlobalProblemEntrySource(entry);
+    if (!entry || !source) return;
+    openArticle(entry.articleId);
+    setTimeout(async () => {
+        if (!currentArticle || !globalIdsEqual(currentArticle.id, entry.articleId)) return;
+        if (entry.chapterId && entry.chapterId !== 'legacy-main' && hasStoredChapters(currentArticle)) await switchToChapter(entry.chapterId);
+        const paragraphs = getReaderParagraphs(getCurrentChapterContent());
+        const anchor = source.question.anchor && typeof source.question.anchor === 'object'
+            ? { ...source.question.anchor, selectedText: source.question.anchor.selectedText || entry.selectedText }
+            : { selectedText: entry.selectedText };
+        const resolution = findAnchorInParagraphs(paragraphs, anchor, source.question.context);
+        if (resolution && flashGlobalProblemAnchor(resolution, source.question)) return;
+        const position = getGlobalWordPosition(source.question);
+        if (position) restoreReadingPosition(position);
+        const display = document.getElementById('text-display');
+        const target = display
+            ? Array.from(display.querySelectorAll('[data-question-id]')).find(element => String(element.dataset.questionId) === String(entry.questionId))
+            : null;
+        if (target) {
+            target.classList.add('temporary-reader-highlight');
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => target.classList.remove('temporary-reader-highlight'), 2500);
+        }
+    }, 120);
 }
